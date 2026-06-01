@@ -1,5 +1,7 @@
 # iTrader
 
+[![CI](https://github.com/luli395/iTrader/actions/workflows/ci.yml/badge.svg)](https://github.com/luli395/iTrader/actions/workflows/ci.yml)
+
 iTrader is a Windows/C++20 trading runtime scaffold with:
 
 - pluggable C++ strategy DLLs
@@ -16,9 +18,25 @@ This public tree intentionally includes only the platform/runtime code and three
 
 Private production strategies, credentials, runtime state, market data, backtest outputs, and deployment notes are not included.
 
+## Why iTrader Exists
+
+Trading infrastructure is safety-sensitive and often hard to review because runtime code, private strategies, credentials, market data, and deployment scripts get mixed together. iTrader separates the public platform surface from private strategy logic so the reusable parts can be inspected, tested, documented, and improved in the open.
+
+The project focuses on:
+
+- a stable C++ strategy plugin ABI
+- reproducible backtest/runtime configuration
+- clear separation between public framework code and private trading logic
+- safer handling of live-mode credentials and generated runtime state
+- practical tooling for Windows and CTP-oriented workflows
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.
+
+## Releases
+
+See `CHANGELOG.md` for public release notes.
 
 ## Layout
 

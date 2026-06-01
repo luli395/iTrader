@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build:
+    name: Windows CMake build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DITRADER_ENABLE_CTP=OFF -DITRADER_ENABLE_CTP_MD=OFF
+
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+
+      - name: Verify expected outputs
+        shell: pwsh
+        run: |
+          $expected = @(
+            "build/Debug/itrader.exe",
+            "build/Debug/itrader_ui_api.exe",
+            "build/Debug/sample_strategy.dll",
+            "build/Debug/timed_roundtrip_strategy.dll",
+            "build/Debug/noop_strategy.dll"
+          )
+          foreach ($path in $expected) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing expected build artifact: $path"
+            }
+          }
+
+  secret-scan:
+    name: Basic public secret hygiene
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for obvious private artifacts
+        run: |
+          set -euo pipefail
+          ! find . -path ./.git -prune -o -type f \( \
+            -iname "*.env" -o \
+            -iname "*.dll" -o \
+            -iname "*.exe" -o \
+            -iname "*.lib" -o \
+            -iname "*.pdb" -o \
+            -iname "*.zip" -o \
+            -iname "*.rar" -o \
+            -iname "*.7z" \
+          \) -print | grep .
+
+      - name: Check for project-private references
+        run: |
+          set -euo pipefail
+          ! grep -RInE "ag_breakout|dominant|oipy|breakout_resume|remote-deployment|14\.103|258000|client_lsx|E:/iTrader|E:\\\\iTrader" \
+            --exclude-dir=.git \
+            --exclude=ci.yml .
