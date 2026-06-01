@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>iTrader Control Center</title>
+    <link rel="stylesheet" href="./styles.css?v=20260524_account_summary_inventory_draft" />
+    <script>
+        window.__itraderChartLibraryLoaded = false;
+        window.__itraderChartLibraryFailed = false;
+    </script>
+    <script
+        async
+        src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"
+        onload="window.__itraderChartLibraryLoaded = true; window.dispatchEvent(new Event('itrader:chart-library-ready'));"
+        onerror="window.__itraderChartLibraryFailed = true; window.dispatchEvent(new Event('itrader:chart-library-error'));"
+    ></script>
+</head>
+<body>
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand__logo">IT</div>
+                <div>
+                    <p class="eyebrow">Quant Operations</p>
+                    <h1>iTrader Control Center</h1>
+                </div>
+            </div>
+
+            <nav class="nav">
+                <button class="nav__item nav__item--active" data-section="overview">Overview</button>
+                <button class="nav__item" data-section="accounts">Accounts</button>
+                <button class="nav__item" data-section="strategies">Strategies</button>
+                <button class="nav__item" data-section="config">Config Studio</button>
+                <button class="nav__item" data-section="activity">Activity</button>
+            </nav>
+
+            <section class="sidebar-card">
+                <p class="sidebar-card__label">Workspace</p>
+                <p class="sidebar-card__value">Local workspace</p>
+                <p class="sidebar-card__muted">Browser UI with optional localhost API integration for config-backed data.</p>
+            </section>
+
+            <section class="sidebar-card sidebar-card--accent">
+                <p class="sidebar-card__label">Current build</p>
+                <p class="sidebar-card__value">C++20 / CTP / DLL strategies</p>
+                <p class="sidebar-card__muted">Supports multi-account, multi-strategy, backtest, and live mode.</p>
+            </section>
+        </aside>
+
+        <main class="main">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">Execution Surface</p>
+                    <h2 id="page-title">Overview</h2>
+                </div>
+
+                <div class="topbar__actions">
+                    <div class="segmented" id="mode-switch">
+                        <button class="segmented__item segmented__item--active" data-mode="backtest">Backtest</button>
+                        <button class="segmented__item" data-mode="live">Live</button>
+                    </div>
+                    <button class="ghost-button" id="load-sample-button">Refresh API</button>
+                    <button class="primary-button" id="download-config-button">Download INI</button>
+                </div>
+            </header>
+
+            <section class="layout-row">
+                <div id="backtest-progress" class="backtest-progress hidden" aria-live="polite">
+                    <div class="backtest-progress__row">
+                        <div class="backtest-progress__headline">
+                            <span id="backtest-progress-label">Preparing backtest…</span>
+                            <span id="backtest-progress-files" class="backtest-progress__files hidden">(0/0 files)</span>
+                        </div>
+                        <span id="backtest-progress-value">0%</span>
+                    </div>
+                    <div class="backtest-progress__track">
+                        <div id="backtest-progress-bar" class="backtest-progress__bar"></div>
+                    </div>
+                    <div class="backtest-progress__meta">
+                        <span id="backtest-progress-elapsed">Elapsed 0.0s</span>
+                        <button class="ghost-button" id="cancel-backtest-button" type="button">Cancel wait</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="hero-card panel" id="overview-section">
+                <div>
+                    <p class="eyebrow">Platform posture</p>
+                    <h3>Operate accounts, strategies, and runtime mode from one place</h3>
+                    <p class="hero-card__copy">
+                        This dashboard gives the current scaffold a modern control-plane UI: configure execution mode,
+                        review accounts and strategies, inspect generated INI, and prepare launch commands without editing raw config by hand.
+                    </p>
+                </div>
+                <div class="hero-card__status">
+                    <span class="status-pill" id="status-pill">Backtest ready</span>
+                    <p id="status-caption">Sample backtest configuration is loaded.</p>
+                </div>
+            </section>
+
+            <section class="metrics" id="metrics"></section>
+
+            <section class="layout-row hidden" id="backtest-source-section">
+                <article class="panel panel--wide">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Backtest Source</p>
+                            <h3>Tick replay data source</h3>
+                        </div>
+                    </div>
+                    <div id="backtest-source-form" class="form-grid"></div>
+                </article>
+            </section>
+
+            <section class="layout-row hidden" id="backtest-performance-section">
+                <article class="panel panel--wide">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Backtest Performance</p>
+                            <h3>Post-run metrics</h3>
+                        </div>
+                    </div>
+                    <div id="backtest-performance-content" class="backtest-performance"></div>
+                </article>
+            </section>
+
+            <section class="layout-row hidden" id="live-execution-section">
+                <article class="panel panel--wide">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Live Execution</p>
+                            <h3>Dry run guard</h3>
+                        </div>
+                    </div>
+                    <div id="live-execution-form" class="form-grid"></div>
+                </article>
+            </section>
+
+            <section class="layout-row hidden" id="recorder-config-section">
+                <article class="panel panel--wide">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Recorder</p>
+                            <h3>Standalone MD recorder</h3>
+                        </div>
+                        <div class="topbar__actions">
+                            <button class="ghost-button" id="toggle-recorder-panel-button" type="button" aria-expanded="true">Fold</button>
+                            <button class="ghost-button" id="stop-recorder-button">Stop recorder</button>
+                            <button class="primary-button" id="start-recorder-button">Start recorder</button>
+                            <button class="secondary-button" id="save-recorder-config-button">Save recorder INI</button>
+                        </div>
+                    </div>
+                    <div id="recorder-config-form" class="form-grid"></div>
+                    <pre id="recorder-config-preview" class="code-panel code-panel--compact"></pre>
+                </article>
+            </section>
+
+            <section class="layout-row">
+                <article class="panel panel--wide" id="activity-section">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Operator Notes</p>
+                            <h3>Activity and launch plan</h3>
+                        </div>
+                    </div>
+                    <div class="chart-card">
+                        <div class="chart-card__header">
+                            <div>
+                                <p class="eyebrow">TradingView chart</p>
+                                <h4 id="chart-title">Bars and trading signals</h4>
+                            </div>
+                            <p id="chart-note" class="chart-card__note">Backtest candles come from replay data; live candles will join once the engine publishes a detached bar feed.</p>
+                        </div>
+                        <div class="chart-card__toolbar">
+                            <div id="chart-instrument-tabs" class="chart-tabs" role="tablist" aria-label="Chart instrument tabs"></div>
+                            <label class="chart-filter" for="chart-account-filter">
+                                <span>Account filter</span>
+                                <select id="chart-account-filter"></select>
+                            </label>
+                        </div>
+                        <div id="chart-strategy-tabs" class="chart-tabs chart-tabs--secondary" role="tablist" aria-label="Chart strategy tabs"></div>
+                        <div id="trading-chart" class="trading-chart" aria-label="TradingView candlestick chart"></div>
+                        <p class="chart-card__attribution">Charting by <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">TradingView Lightweight Charts</a></p>
+                    </div>
+                </article>
+            </section>
+
+            <section class="grid two-up">
+                <article class="panel" id="accounts-section">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Accounts</p>
+                            <h3>Connected account surfaces</h3>
+                        </div>
+                        <button class="secondary-button" id="add-account-button">Add account</button>
+                    </div>
+                    <div id="accounts-list" class="stack"></div>
+                </article>
+
+                <article class="panel" id="strategies-section">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Strategies</p>
+                            <h3>Strategy catalog</h3>
+                        </div>
+                        <div class="topbar__actions">
+                            <button class="secondary-button" id="upload-strategy-button">Upload</button>
+                            <button class="secondary-button" id="add-strategy-button">Rescan</button>
+                            <input id="upload-strategy-input" type="file" accept=".dll" hidden>
+                        </div>
+                    </div>
+                    <div id="strategies-list" class="stack"></div>
+                </article>
+            </section>
+
+            <section class="layout-row">
+                <article class="panel panel--wide" id="config-section">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Config Studio</p>
+                            <h3>Generated INI</h3>
+                        </div>
+                        <div class="topbar__actions">
+                            <button class="secondary-button" id="save-config-button">Save to workspace</button>
+                            <button class="ghost-button" id="copy-config-button">Copy to clipboard</button>
+                        </div>
+                    </div>
+                    <pre id="config-preview" class="code-panel"></pre>
+                </article>
+            </section>
+
+            <section class="layout-row hidden" id="runtime-log-section">
+                <article class="panel panel--wide">
+                    <div class="panel__header">
+                        <div>
+                            <p class="eyebrow">Runtime Log</p>
+                            <h3>Live warnings and reconnect events</h3>
+                        </div>
+                    </div>
+                    <div id="runtime-log-content" class="runtime-log-panel"></div>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <template id="account-template">
+        <article class="entity-card">
+            <div class="entity-card__header">
+                <div>
+                    <p class="entity-card__eyebrow">Account</p>
+                    <h4 class="entity-card__title"></h4>
+                </div>
+                <div class="entity-card__actions">
+                    <button class="secondary-button" data-action="config-account">Config</button>
+                    <button class="icon-button" data-action="remove-account" title="Remove account">×</button>
+                </div>
+            </div>
+            <div class="form-grid account-fields"></div>
+        </article>
+    </template>
+
+    <template id="strategy-template">
+        <article class="entity-card">
+            <div class="entity-card__header">
+                <div>
+                    <p class="entity-card__eyebrow">Strategy</p>
+                    <h4 class="entity-card__title"></h4>
+                </div>
+                <button class="icon-button" data-action="remove-strategy" title="Remove strategy">×</button>
+            </div>
+            <div class="form-grid strategy-fields"></div>
+        </article>
+    </template>
+
+    <div id="account-config-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal__backdrop" data-action="close-account-config"></div>
+        <section class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="account-config-title">
+            <div class="modal__header">
+                <div>
+                    <p class="eyebrow">Account Config</p>
+                    <h3 id="account-config-title">Configure account</h3>
+                    <p id="account-config-subtitle" class="modal__subtitle">Open an account to edit its detailed fields.</p>
+                </div>
+                <button class="icon-button" id="account-config-close-button" title="Close account config">×</button>
+            </div>
+
+            <div id="account-config-form" class="form-grid modal__body"></div>
+
+            <div class="modal__footer">
+                <p class="modal__hint">Changes apply to the dashboard immediately. Close the panel when you are done.</p>
+                <button class="primary-button" id="account-config-done-button">Done</button>
+            </div>
+        </section>
+    </div>
+
+    <div id="strategy-picker-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal__backdrop" data-action="close-strategy-picker"></div>
+        <section class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="strategy-picker-title">
+            <div class="modal__header">
+                <div>
+                    <p class="eyebrow">Strategy Picker</p>
+                    <h3 id="strategy-picker-title">Attach strategy</h3>
+                    <p id="strategy-picker-subtitle" class="modal__subtitle">Choose a strategy from the automatic catalog, attach an existing saved strategy definition, or type a DLL path manually.</p>
+                </div>
+                <button class="icon-button" id="strategy-picker-close-button" title="Close strategy picker">×</button>
+            </div>
+
+            <div id="strategy-picker-body" class="modal__body strategy-picker-modal__body"></div>
+
+            <div class="modal__footer">
+                <p class="modal__hint">Catalog DLLs are resolved relative to the active config file. Manual DLL paths can be relative or absolute.</p>
+                <button class="primary-button" id="strategy-picker-done-button">Done</button>
+            </div>
+        </section>
+    </div>
+
+    <div id="backtest-done-modal" class="modal modal--dialog hidden" aria-hidden="true">
+        <div class="modal__backdrop" data-action="close-backtest-done"></div>
+        <section class="modal__panel modal__panel--dialog" role="alertdialog" aria-modal="true" aria-labelledby="backtest-done-title" aria-describedby="backtest-done-message">
+            <div class="modal__header">
+                <div>
+                    <p class="eyebrow">Backtest Status</p>
+                    <h3 id="backtest-done-title">Backtesting Done</h3>
+                    <p id="backtest-done-message" class="modal__subtitle">Backtest replay completed successfully.</p>
+                </div>
+                <button class="icon-button" id="backtest-done-close-button" title="Close backtest completion dialog">×</button>
+            </div>
+
+            <div class="modal__body modal__body--compact">
+                <section class="backtest-done">
+                    <div class="backtest-done__badge">Completed successfully</div>
+                    <p class="backtest-done__copy">The latest backtest state is now loaded into the dashboard.</p>
+                    <p id="backtest-done-meta" class="backtest-done__meta hidden"></p>
+                </section>
+            </div>
+
+            <div class="modal__footer">
+                <p class="modal__hint">Review the Backtest Performance panel, account summary, and chart area for the freshly completed run.</p>
+                <button class="primary-button" id="backtest-done-ok-button">Done</button>
+            </div>
+        </section>
+    </div>
+
+    <script src="./app.js?v=20260525_recorder_watchdog_telemetry_cleanup"></script>
+</body>
+</html>

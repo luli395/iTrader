@@ -1,0 +1,54 @@
+.env
+*.env
+
+# Credentials and local-only live configs
+configs/live.ini
+configs/live_prod.ini
+configs/ctp_md_recorder.ini
+configs/*prod*.ini
+configs/*local*.ini
+
+# Build outputs
+build/
+out/
+.vs/
+*.obj
+*.dll
+*.exe
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Runtime state and generated outputs
+runtime/
+reports/
+temp/
+logs/
+backups/
+deploy_backups/
+scratch_remote/
+strategies/bin/
+strategies/snapshots/
+
+# Market data and large archives
+data/ticks/
+AGTICK*/
+AUTICK*/
+*.csv
+*.zip
+*.rar
+*.7z
+
+# Python / editor state
+__pycache__/
+*.pyc
+.venv/
+.venv-*/
+.vscode/
+.idea/
+
+# Generated figures
+*.fig
+*.png
+*.svg
