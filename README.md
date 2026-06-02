@@ -16,7 +16,7 @@ This public tree intentionally includes only the platform/runtime code and three
 - `strategies/timed_roundtrip_strategy.cpp`
 - `strategies/noop_strategy.cpp`
 
-Private production strategies, credentials, runtime state, market data, backtest outputs, and deployment notes are not included.
+Private production strategies, credentials, runtime state, full market data archives, backtest outputs, and deployment notes are not included.
 
 ## Why iTrader Exists
 
@@ -87,7 +87,7 @@ Backtest example:
 .\build\Debug\itrader.exe --mode backtest --config .\configs\backtest.ini --output-dir .\reports\sample_run
 ```
 
-The sample config expects AGTICK-style CSV data under `data/ticks` unless you edit the INI.
+The repository includes `data/ticks/AG_20260506.csv` as a public AGTICK-style sample. The sample config reads AGTICK-style CSV data from `data/ticks` unless you edit the INI.
 
 Control Center UI:
 

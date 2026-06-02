@@ -32,10 +32,12 @@ strategies/bin/
 strategies/snapshots/
 
 # Market data and large archives
-data/ticks/
+data/ticks/*
 AGTICK*/
 AUTICK*/
 *.csv
+!data/ticks/
+!data/ticks/AG_20260506.csv
 *.zip
 *.rar
 *.7z
