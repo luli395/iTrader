@@ -1,7 +1,7 @@
 const API_BASE = window.location.protocol.startsWith('http')
     ? window.location.origin
     : 'http://127.0.0.1:8080';
-const APP_ASSET_VERSION = '20260525_recorder_watchdog_telemetry_cleanup';
+const APP_ASSET_VERSION = '20260602_live_chart_cache_merge';
 
 function createSampleRecorderConfig() {
     return {
@@ -412,9 +412,12 @@ const chartRuntime = {
     lastBarData: [],
     lastIndicatorData: new Map(),
     lastMarkerKey: '',
+    lastOverlayMarkerKey: '',
     markerLayer: null,
     markerRedrawHandler: null,
-    currentMarkerPayload: []
+    currentMarkerPayload: [],
+    lastWidth: 0,
+    lastHeight: 0
 };
 
 const renderRuntime = {
@@ -1811,6 +1814,26 @@ function cloneChartInstrumentEntry(entry) {
     };
 }
 
+function mergeLiveChartBars(cachedBars, incomingBars, maxBars = 0) {
+    const mergedByTime = new Map();
+    const addBar = (bar) => {
+        if (!bar || bar.time === null || bar.time === undefined) {
+            return;
+        }
+        mergedByTime.set(bar.time, { ...bar });
+    };
+
+    (Array.isArray(cachedBars) ? cachedBars : []).forEach(addBar);
+    (Array.isArray(incomingBars) ? incomingBars : []).forEach(addBar);
+
+    const merged = Array.from(mergedByTime.values())
+        .sort((left, right) => left.time - right.time);
+    if (maxBars > 0 && merged.length > maxBars) {
+        return merged.slice(merged.length - maxBars);
+    }
+    return merged;
+}
+
 function chartIndicatorSeriesKey(series) {
     return `${series.strategy_id || ''}:${series.account_id || ''}:${series.indicator_id || series.label || ''}`;
 }
@@ -1915,25 +1938,27 @@ function stabilizeLiveInstrumentEntries(entries) {
         const latestCached = cached.bars.at(-1)?.time ?? 0;
         const severeShrinkThreshold = Math.max(3, Math.floor(cached.bars.length * 0.35));
         const severeShrink = cached.bars.length >= 20 && entry.bars.length < severeShrinkThreshold;
-        const looksLikePartialSnapshot = severeShrink && latestNew <= latestCached;
-        const stableIndicatorSeries = stabilizeIndicatorSeries(entry.indicator_series, cached.indicator_series, latestNew, latestCached);
+        const looksLikePartialSnapshot = severeShrink;
+        const mergedBars = looksLikePartialSnapshot
+            ? mergeLiveChartBars(cached.bars, entry.bars, Math.max(cached.bars.length, entry.bars.length))
+            : entry.bars;
+        const latestMerged = mergedBars.at(-1)?.time ?? latestNew;
+        const stableIndicatorSeries = stabilizeIndicatorSeries(entry.indicator_series, cached.indicator_series, latestMerged, latestCached);
         const stabilizedEntry = {
             ...entry,
+            bars: mergedBars,
             indicator_series: stableIndicatorSeries,
             signals: entry.signals.length > 0 ? entry.signals : cached.signals,
             warnings: entry.warnings.length > 0 ? entry.warnings : cached.warnings
         };
 
         if (looksLikePartialSnapshot) {
-            return {
-                ...stabilizedEntry,
-                bars: cached.bars,
-                indicator_series: cached.indicator_series.length > 0 ? cached.indicator_series : stabilizedEntry.indicator_series
-            };
+            chartRuntime.stableInstrumentCache.set(cacheKey, cloneChartInstrumentEntry(stabilizedEntry));
+            return stabilizedEntry;
         }
 
-        const shouldRefreshCache = entry.bars.length >= Math.floor(cached.bars.length * 0.6)
-            || latestNew > latestCached;
+        const shouldRefreshCache = mergedBars.length >= Math.floor(cached.bars.length * 0.6)
+            || latestMerged > latestCached;
         if (shouldRefreshCache) {
             chartRuntime.stableInstrumentCache.set(cacheKey, cloneChartInstrumentEntry(stabilizedEntry));
         }
@@ -2248,8 +2273,11 @@ function destroyChart() {
     chartRuntime.lastBarData = [];
     chartRuntime.lastIndicatorData.clear();
     chartRuntime.lastMarkerKey = '';
+    chartRuntime.lastOverlayMarkerKey = '';
     chartRuntime.currentMarkerPayload = [];
     chartRuntime.hasFittedContent = false;
+    chartRuntime.lastWidth = 0;
+    chartRuntime.lastHeight = 0;
 }
 
 function buildChartRenderKey(instrument, activeAccount, activeStrategy, indicatorSeries) {
@@ -2350,7 +2378,11 @@ function renderChartSignalMarkers(instance, candleSeries, markerPayload, createS
         : [];
 
     const nextMarkerKey = buildChartMarkerKey(chartRuntime.currentMarkerPayload);
-    const overlayRendered = renderPriceCoordinateTradeMarkers(instance, candleSeries, chartRuntime.currentMarkerPayload);
+    let overlayRendered = true;
+    if (chartRuntime.lastOverlayMarkerKey !== nextMarkerKey || !chartRuntime.markerLayer) {
+        overlayRendered = renderPriceCoordinateTradeMarkers(instance, candleSeries, chartRuntime.currentMarkerPayload);
+        chartRuntime.lastOverlayMarkerKey = overlayRendered ? nextMarkerKey : '';
+    }
     if (typeof createSeriesMarkers === 'function') {
         const nativeMarkers = overlayRendered
             ? []
@@ -7906,9 +7938,8 @@ function renderChart() {
 
     const renderKey = buildChartRenderKey(instrumentEntry.instrument, activeAccount, activeStrategy, visibleIndicatorSeries);
     const seriesIdentityKey = buildChartSeriesIdentityKey(visibleIndicatorSeries);
-    const hasSeriesConfigChanged = !chartRuntime.lastSeriesIdentityKey || chartRuntime.lastSeriesIdentityKey !== seriesIdentityKey;
+    const hasSeriesConfigChanged = chartRuntime.lastSeriesIdentityKey !== seriesIdentityKey;
     const shouldRecreateChart = !chartRuntime.instance
-        || chartRuntime.lastRenderKey !== renderKey
         || !chartRuntime.candleSeries
         || chartRuntime.indicatorSeries.length !== visibleIndicatorSeries.length
         || hasSeriesConfigChanged;
@@ -7968,7 +7999,10 @@ function renderChart() {
         chartRuntime.lastBarData = [];
         chartRuntime.lastIndicatorData.clear();
         chartRuntime.lastMarkerKey = '';
+        chartRuntime.lastOverlayMarkerKey = '';
         chartRuntime.hasFittedContent = false;
+        chartRuntime.lastWidth = width;
+        chartRuntime.lastHeight = height;
     }
 
     const instance = chartRuntime.instance;
@@ -7977,7 +8011,12 @@ function renderChart() {
         return;
     }
 
-    instance.resize(width, height);
+    if (chartRuntime.lastWidth !== width || chartRuntime.lastHeight !== height) {
+        instance.resize(width, height);
+        chartRuntime.lastWidth = width;
+        chartRuntime.lastHeight = height;
+        chartRuntime.lastOverlayMarkerKey = '';
+    }
     chartRuntime.lastBarData = syncChartSeriesData(
         candleSeries,
         instrumentEntry.bars,
@@ -8256,10 +8295,17 @@ window.addEventListener('resize', () => {
         return;
     }
 
-    chartRuntime.instance.resize(
-        Math.max(tradingChart.clientWidth, 320),
-        Math.max(tradingChart.clientHeight, 320)
-    );
+    const width = Math.max(tradingChart.clientWidth, 320);
+    const height = Math.max(tradingChart.clientHeight, 320);
+    if (chartRuntime.lastWidth === width && chartRuntime.lastHeight === height) {
+        return;
+    }
+
+    chartRuntime.instance.resize(width, height);
+    chartRuntime.lastWidth = width;
+    chartRuntime.lastHeight = height;
+    chartRuntime.lastOverlayMarkerKey = '';
+    renderPriceCoordinateTradeMarkers(chartRuntime.instance, chartRuntime.candleSeries, chartRuntime.currentMarkerPayload);
 });
 
 window.addEventListener('itrader:chart-library-ready', () => {
