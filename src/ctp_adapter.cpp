@@ -121,9 +121,12 @@ int today_quantity_from_ctp(const CThostFtdcInvestorPositionField* position) {
         return 0;
     }
     if (position->PositionDate == THOST_FTDC_PSD_Today) {
-        return position->Position > 0 ? position->Position : position->TodayPosition;
+        return position->Position > 0 ? position->Position : std::max(position->TodayPosition, 0);
     }
-    return position->TodayPosition;
+    if (position->PositionDate == THOST_FTDC_PSD_History) {
+        return 0;
+    }
+    return std::max(position->TodayPosition, 0);
 }
 
 int yesterday_quantity_from_ctp(const CThostFtdcInvestorPositionField* position) {
@@ -131,21 +134,19 @@ int yesterday_quantity_from_ctp(const CThostFtdcInvestorPositionField* position)
         return 0;
     }
     if (position->PositionDate == THOST_FTDC_PSD_History) {
-        if (position->Position > 0) {
-            return position->Position;
-        }
-        if (position->YdPosition > 0) {
-            return position->YdPosition;
-        }
+        return std::max(position->Position, 0);
     }
 
-    if (position->YdPosition > 0) {
-        return position->YdPosition;
-    }
-    if (position->TodayPosition == 0 && position->Position > 0) {
-        return position->Position;
-    }
-    return 0;
+    const int total_quantity = std::max(position->Position, 0);
+    const int today_quantity = std::max(position->TodayPosition, 0);
+    return total_quantity > today_quantity ? (total_quantity - today_quantity) : 0;
+}
+
+bool ctp_position_snapshot_is_flat(const CtpInstrumentPositionSnapshot& snapshot) {
+    return snapshot.long_today_quantity == 0
+        && snapshot.long_yesterday_quantity == 0
+        && snapshot.short_today_quantity == 0
+        && snapshot.short_yesterday_quantity == 0;
 }
 
 long long steady_now_millis() {
@@ -517,6 +518,9 @@ std::vector<CtpInstrumentPositionSnapshot> CtpTraderGateway::query_positions(std
     std::vector<CtpInstrumentPositionSnapshot> positions;
     positions.reserve(it->second.positions_by_key.size());
     for (const auto& [_, snapshot] : it->second.positions_by_key) {
+        if (ctp_position_snapshot_is_flat(snapshot)) {
+            continue;
+        }
         positions.push_back(snapshot);
     }
     position_queries_.erase(request_id);
