@@ -2218,15 +2218,36 @@ bool is_trade_fill_event(const OrderEvent& event) {
         && event.filled_price > 0.0;
 }
 
-std::string live_fill_tracking_key(const OrderEvent& event) {
-    if (!event.order_id.empty()) {
-        return event.order_id;
+std::string compact_fill_timestamp_date(std::string_view timestamp) {
+    const auto trimmed = trim_copy(timestamp);
+    if (trimmed.size() >= 10 && trimmed[4] == '-' && trimmed[7] == '-') {
+        return trimmed.substr(0, 10);
     }
-    if (!event.client_order_id.empty()) {
-        return "client:" + event.client_order_id;
+    if (trimmed.size() >= 8) {
+        return trimmed.substr(0, 8);
+    }
+    return {};
+}
+
+bool has_strategy_client_order_id(std::string_view client_order_id, std::string_view order_id) {
+    return !client_order_id.empty() && client_order_id != order_id;
+}
+
+std::string live_fill_tracking_key(const OrderEvent& event) {
+    if (has_strategy_client_order_id(event.client_order_id, event.order_id)) {
+        return "client:" + event.account_id + '|' + event.strategy_id + '|' + event.client_order_id;
+    }
+    if (!event.order_id.empty() && event.signal_time_ms > 0) {
+        return "order-signal:" + event.account_id + '|' + event.strategy_id + '|' + event.order_id + '|'
+            + std::to_string(event.signal_time_ms);
+    }
+    if (!event.order_id.empty()) {
+        return "order-date:" + event.account_id + '|' + event.strategy_id + '|' + compact_fill_timestamp_date(event.timestamp)
+            + '|' + event.order_id;
     }
     if (!event.source_order_id.empty()) {
-        return "trade:" + event.source_order_id;
+        return "trade:" + event.account_id + '|' + event.strategy_id + '|' + event.source_order_id + '|'
+            + event.instrument + '|' + compact_fill_timestamp_date(event.timestamp);
     }
     return {};
 }
@@ -5579,6 +5600,7 @@ struct RecoveredWorkingOrderBinding {
 };
 
 using RecoveredWorkingOrderLookup = std::map<std::string, std::map<std::string, RecoveredWorkingOrderBinding>>;
+using RecoveredTradeAggregateQuantities = std::map<std::string, int>;
 
 RecoveredWorkingOrderLookup build_recovered_working_order_lookup(const PersistedStrategyStateStore& store) {
     RecoveredWorkingOrderLookup lookup;
@@ -5619,30 +5641,61 @@ std::string recovered_trade_dedupe_key(const RuntimeOrderSnapshot& trade) {
 
 using RecoveredTradeReplayMap = std::map<std::string, std::vector<RuntimeOrderSnapshot>>;
 
-RecoveredWorkingOrderLookup build_recovered_trade_binding_lookup(
-    const PersistedStrategyStateStore& state_store,
-    const PersistedInventoryStore& inventory_store) {
+std::string recovered_trade_aggregate_key(const RuntimeOrderSnapshot& trade) {
+    return trade.order_id + '|' + trade.timestamp + '|' + trade.account_id + '|' + trade.strategy_id + '|'
+        + trade.instrument + '|' + itrader::to_string(trade.side) + '|' + itrader::to_string(trade.offset) + '|'
+        + format_price(trade.filled_price);
+}
 
-    auto lookup = build_recovered_working_order_lookup(state_store);
+void add_known_recovered_trade_aggregate(
+    RecoveredTradeAggregateQuantities& aggregate_quantities,
+    const RuntimeOrderSnapshot& order) {
+
+    if (order.filled_volume <= 1 || order.filled_price <= 0.0 || order.order_id.empty()) {
+        return;
+    }
+
+    const auto key = recovered_trade_aggregate_key(order);
+    auto& quantity = aggregate_quantities[key];
+    quantity = std::max(quantity, order.filled_volume);
+}
+
+RecoveredTradeAggregateQuantities build_known_recovered_trade_aggregates(
+    const PersistedInventoryStore& inventory_store,
+    const std::map<std::string, LiveAttachmentTelemetry>& attachment_telemetry,
+    std::string_view account_id) {
+
+    RecoveredTradeAggregateQuantities aggregate_quantities;
     for (const auto& [attachment_key, fills] : inventory_store.fill_history_by_attachment) {
-        const auto account_id = std::string(attachment_key_account_id(attachment_key));
-        if (account_id.empty()) {
+        if (attachment_key_account_id(attachment_key) != account_id) {
             continue;
         }
 
         for (const auto& fill : fills) {
-            if (fill.order_id.empty() || fill.client_order_id.empty()) {
-                continue;
-            }
-
-            lookup[account_id][fill.order_id] = RecoveredWorkingOrderBinding {
-                .attachment_key = attachment_key,
-                .client_order_id = fill.client_order_id,
-            };
+            add_known_recovered_trade_aggregate(aggregate_quantities, fill);
         }
     }
 
-    return lookup;
+    for (const auto& [_, attachment] : attachment_telemetry) {
+        if (attachment.snapshot.account_id != account_id) {
+            continue;
+        }
+
+        for (const auto& order : attachment.closed_orders) {
+            add_known_recovered_trade_aggregate(aggregate_quantities, order);
+        }
+    }
+
+    return aggregate_quantities;
+}
+
+bool recovered_trade_is_covered_by_known_aggregate(
+    const RecoveredTradeAggregateQuantities& aggregate_quantities,
+    const RuntimeOrderSnapshot& trade) {
+
+    const auto aggregate_it = aggregate_quantities.find(recovered_trade_aggregate_key(trade));
+    return aggregate_it != aggregate_quantities.end()
+        && aggregate_it->second >= std::max(1, trade.filled_volume);
 }
 
 std::set<std::string> build_known_recovered_trade_keys(
@@ -5687,9 +5740,7 @@ RecoveredTradeReplayMap recover_live_trades_from_broker(
 
     RecoveredTradeReplayMap recovered_trades_by_attachment;
 
-    const auto recovered_binding_lookup = build_recovered_trade_binding_lookup(
-        persisted_strategy_state_store,
-        persisted_inventory_store);
+    const auto recovered_binding_lookup = build_recovered_working_order_lookup(persisted_strategy_state_store);
 
     for (auto& [account_id, account] : accounts) {
         if (account.gateway == nullptr) {
@@ -5697,6 +5748,10 @@ RecoveredTradeReplayMap recover_live_trades_from_broker(
         }
 
         auto known_trade_keys = build_known_recovered_trade_keys(
+            persisted_inventory_store,
+            attachment_telemetry,
+            account_id);
+        auto known_trade_aggregates = build_known_recovered_trade_aggregates(
             persisted_inventory_store,
             attachment_telemetry,
             account_id);
@@ -5776,11 +5831,15 @@ RecoveredTradeReplayMap recover_live_trades_from_broker(
             if (known_trade_keys.contains(trade_key)) {
                 continue;
             }
+            if (recovered_trade_is_covered_by_known_aggregate(known_trade_aggregates, trade)) {
+                continue;
+            }
 
             telemetry_it->second.closed_orders.push_back(trade);
             recovered_trades_by_attachment[attachment_key].push_back(trade);
             refresh_attachment_orders(telemetry_it->second);
             known_trade_keys.insert(trade_key);
+            add_known_recovered_trade_aggregate(known_trade_aggregates, trade);
             ++recovered_count;
         }
 
