@@ -4037,6 +4037,9 @@ public:
         request.volume = intent.volume;
         request.activate_at_ms = intent.activate_at_ms;
         request.signal_time_ms = intent.signal_time_ms;
+        if (mode_ == Mode::Live && intent.execution_policy == IntentExecutionPolicy::CtpParkedOrder) {
+            request.activate_at_ms = kCtpParkedOrderActivateAtMs;
+        }
         if (mode_ == Mode::Backtest && intent.execution_policy == IntentExecutionPolicy::RuntimeSyntheticFill) {
             request.backtest_force_fill = true;
             request.backtest_fill_price = intent.expected_fill_price > 0.0 ? intent.expected_fill_price : intent.limit_price;
@@ -7542,7 +7545,7 @@ int run_live(const std::filesystem::path& config_path, const IniFile& ini) {
 
                     if (live_execution_config.dry_run) {
                         static constexpr std::string_view kDryRunFillMessage =
-                            "Dry run simulated fill at the platform layer; broker submission was skipped before ReqOrderInsert.";
+                            "Dry run simulated fill at the platform layer; broker submission was skipped before CTP order insertion.";
                         platform_order_events.push_back(make_live_dry_run_fill_event(
                             account_it->second,
                             request,
@@ -7697,7 +7700,7 @@ int run_live(const std::filesystem::path& config_path, const IniFile& ini) {
     }
 
     if (live_execution_config.dry_run) {
-        const std::string warning = "Live dry run is enabled: strategies, warmup, broker recovery, and market-data flow stay active; broker submissions are skipped before ReqOrderInsert, and the platform records local paper fills so entry/exit logic can run end-to-end.";
+        const std::string warning = "Live dry run is enabled: strategies, warmup, broker recovery, and market-data flow stay active; broker submissions are skipped before CTP order insertion, and the platform records local paper fills so entry/exit logic can run end-to-end.";
         append_unique_warning(telemetry_warnings, warning);
         for (auto& [_, attachment] : attachment_telemetry) {
             append_unique_warning(attachment.snapshot.warnings, warning);

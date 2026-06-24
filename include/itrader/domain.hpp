@@ -34,7 +34,10 @@ enum class PriceType {
 enum class IntentExecutionPolicy {
     NativeOrder,
     RuntimeSyntheticFill,
+    CtpParkedOrder,
 };
+
+constexpr long long kCtpParkedOrderActivateAtMs = -2;
 
 enum class OrderStatus {
     Submitted,
@@ -187,7 +190,19 @@ inline std::string to_string(PriceType type) {
 }
 
 inline std::string to_string(IntentExecutionPolicy policy) {
-    return policy == IntentExecutionPolicy::RuntimeSyntheticFill ? "runtime_synthetic_fill" : "native_order";
+    switch (policy) {
+    case IntentExecutionPolicy::NativeOrder:
+        return "native_order";
+    case IntentExecutionPolicy::RuntimeSyntheticFill:
+        return "runtime_synthetic_fill";
+    case IntentExecutionPolicy::CtpParkedOrder:
+        return "ctp_parked_order";
+    }
+    return "native_order";
+}
+
+inline bool is_ctp_parked_order_request(const OrderRequest& request) {
+    return request.activate_at_ms == kCtpParkedOrderActivateAtMs;
 }
 
 inline std::string to_string(OrderStatus status) {

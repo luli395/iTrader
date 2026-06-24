@@ -723,6 +723,8 @@ bool CtpTraderGateway::submit_order(const OrderRequest& request, std::string* er
         }
     }
 
+    const bool submit_as_parked_order = is_ctp_parked_order_request(request);
+
     CThostFtdcInputOrderField order {};
     copy_trunc(order.BrokerID, sizeof(order.BrokerID), config_.broker_id);
     copy_trunc(order.InvestorID, sizeof(order.InvestorID), config_.investor_id);
@@ -745,7 +747,9 @@ bool CtpTraderGateway::submit_order(const OrderRequest& request, std::string* er
     order.CombHedgeFlag[0] = THOST_FTDC_HF_Speculation;
     order.LimitPrice = request.price_type == PriceType::Limit ? request.limit_price : 0.0;
     order.VolumeTotalOriginal = request.volume;
-    order.TimeCondition = (request.price_type == PriceType::Market || request.immediate_or_cancel) ? THOST_FTDC_TC_IOC : THOST_FTDC_TC_GFD;
+    order.TimeCondition = submit_as_parked_order
+        ? THOST_FTDC_TC_GFD
+        : ((request.price_type == PriceType::Market || request.immediate_or_cancel) ? THOST_FTDC_TC_IOC : THOST_FTDC_TC_GFD);
     order.VolumeCondition = THOST_FTDC_VC_AV;
     order.MinVolume = 1;
     order.ContingentCondition = THOST_FTDC_CC_Immediately;
@@ -769,7 +773,41 @@ bool CtpTraderGateway::submit_order(const OrderRequest& request, std::string* er
         order_ref_to_limit_price_[order_ref] = request.price_type == PriceType::Limit ? request.limit_price : 0.0;
     }
 
-    const int return_code = api_->ReqOrderInsert(&order, next_request_id());
+    const int request_id = next_request_id();
+    int return_code = 0;
+    if (submit_as_parked_order) {
+        CThostFtdcParkedOrderField parked_order {};
+        copy_trunc(parked_order.BrokerID, sizeof(parked_order.BrokerID), config_.broker_id);
+        copy_trunc(parked_order.InvestorID, sizeof(parked_order.InvestorID), config_.investor_id);
+        copy_trunc(parked_order.UserID, sizeof(parked_order.UserID), config_.user_id);
+        copy_trunc(parked_order.reserve1, sizeof(parked_order.reserve1), request.instrument);
+        copy_trunc(parked_order.InstrumentID, sizeof(parked_order.InstrumentID), request.instrument);
+        copy_trunc(parked_order.ExchangeID, sizeof(parked_order.ExchangeID), request.exchange);
+        copy_trunc(parked_order.OrderRef, sizeof(parked_order.OrderRef), order_ref);
+        copy_trunc(parked_order.IPAddress, sizeof(parked_order.IPAddress), "127.0.0.1");
+        copy_trunc(parked_order.reserve2, sizeof(parked_order.reserve2), "127.0.0.1");
+
+        parked_order.OrderPriceType = order.OrderPriceType;
+        parked_order.Direction = order.Direction;
+        parked_order.CombOffsetFlag[0] = order.CombOffsetFlag[0];
+        parked_order.CombHedgeFlag[0] = order.CombHedgeFlag[0];
+        parked_order.LimitPrice = order.LimitPrice;
+        parked_order.VolumeTotalOriginal = order.VolumeTotalOriginal;
+        parked_order.TimeCondition = THOST_FTDC_TC_GFD;
+        parked_order.VolumeCondition = order.VolumeCondition;
+        parked_order.MinVolume = order.MinVolume;
+        parked_order.ContingentCondition = THOST_FTDC_CC_ParkedOrder;
+        parked_order.ForceCloseReason = order.ForceCloseReason;
+        parked_order.IsAutoSuspend = order.IsAutoSuspend;
+        parked_order.RequestID = request_id;
+        parked_order.UserForceClose = order.UserForceClose;
+        parked_order.Status = THOST_FTDC_PAOS_NotSend;
+        parked_order.IsSwapOrder = 0;
+
+        return_code = api_->ReqParkedOrderInsert(&parked_order, request_id);
+    } else {
+        return_code = api_->ReqOrderInsert(&order, request_id);
+    }
     if (return_code != 0) {
         {
             std::lock_guard lock(mutex_);
@@ -785,7 +823,8 @@ bool CtpTraderGateway::submit_order(const OrderRequest& request, std::string* er
             order_ref_to_limit_price_.erase(order_ref);
         }
         if (error_message != nullptr) {
-            *error_message = "ReqOrderInsert returned " + std::to_string(return_code);
+            *error_message = std::string(submit_as_parked_order ? "ReqParkedOrderInsert returned " : "ReqOrderInsert returned ")
+                + std::to_string(return_code);
         }
         return false;
     }
@@ -806,7 +845,7 @@ bool CtpTraderGateway::submit_order(const OrderRequest& request, std::string* er
         .filled_price = 0.0,
         .signal_time_ms = request.signal_time_ms,
         .status = OrderStatus::Submitted,
-        .message = "submitted to CTP",
+        .message = submit_as_parked_order ? "submitted to CTP parked order queue" : "submitted to CTP",
         .timestamp = now_string(),
     });
     return true;
@@ -1243,6 +1282,75 @@ void CtpTraderGateway::OnRspOrderInsert(CThostFtdcInputOrderField* input_order, 
         order_ref_to_requested_volume_.erase(input_order->OrderRef);
         order_ref_to_cumulative_trade_volume_.erase(input_order->OrderRef);
         order_ref_to_limit_price_.erase(input_order->OrderRef);
+    }
+}
+
+void CtpTraderGateway::OnRspParkedOrderInsert(CThostFtdcParkedOrderField* parked_order, CThostFtdcRspInfoField* rsp_info, int, bool) {
+    if (parked_order == nullptr) {
+        return;
+    }
+
+    const auto error = rsp_error_message(rsp_info);
+
+    std::string strategy_id;
+    std::string client_order_id;
+    long long signal_time_ms = 0;
+    double limit_price = parked_order->LimitPrice;
+    {
+        std::lock_guard lock(mutex_);
+        if (const auto strategy_code = parse_order_ref_strategy_code(parked_order->OrderRef); strategy_code.has_value()) {
+            const auto it = strategy_code_to_id_.find(*strategy_code);
+            if (it != strategy_code_to_id_.end()) {
+                strategy_id = it->second;
+            }
+        }
+        const auto client_it = order_to_client_id_.find(parked_order->OrderRef);
+        if (client_it != order_to_client_id_.end()) {
+            client_order_id = client_it->second;
+        }
+        const auto signal_it = order_ref_to_signal_time_ms_.find(parked_order->OrderRef);
+        if (signal_it != order_ref_to_signal_time_ms_.end()) {
+            signal_time_ms = signal_it->second;
+        }
+        if (limit_price <= 0.0) {
+            if (const auto limit_it = order_ref_to_limit_price_.find(parked_order->OrderRef); limit_it != order_ref_to_limit_price_.end()) {
+                limit_price = limit_it->second;
+            }
+        }
+    }
+
+    push_event(OrderEvent {
+        .order_id = parked_order->OrderRef,
+        .source_order_id = parked_order->ParkedOrderID,
+        .client_order_id = client_order_id.empty() ? parked_order->OrderRef : client_order_id,
+        .account_id = account_id_,
+        .strategy_id = strategy_id,
+        .instrument = parked_order->InstrumentID,
+        .exchange = parked_order->ExchangeID,
+        .side = side_from_ctp(parked_order->Direction),
+        .offset = offset_from_ctp(parked_order->CombOffsetFlag[0]),
+        .requested_volume = parked_order->VolumeTotalOriginal,
+        .filled_volume = 0,
+        .limit_price = limit_price,
+        .filled_price = 0.0,
+        .signal_time_ms = signal_time_ms,
+        .status = error.empty() ? OrderStatus::Accepted : OrderStatus::Rejected,
+        .message = error.empty() ? "accepted by CTP parked order queue" : error,
+        .timestamp = now_string(),
+    });
+
+    if (!error.empty()) {
+        std::lock_guard lock(mutex_);
+        if (!client_order_id.empty()) {
+            client_id_to_order_ref_.erase(client_order_id);
+        }
+        order_to_client_id_.erase(parked_order->OrderRef);
+        order_ref_to_exchange_.erase(parked_order->OrderRef);
+        order_ref_to_instrument_.erase(parked_order->OrderRef);
+        order_ref_to_signal_time_ms_.erase(parked_order->OrderRef);
+        order_ref_to_requested_volume_.erase(parked_order->OrderRef);
+        order_ref_to_cumulative_trade_volume_.erase(parked_order->OrderRef);
+        order_ref_to_limit_price_.erase(parked_order->OrderRef);
     }
 }
 
