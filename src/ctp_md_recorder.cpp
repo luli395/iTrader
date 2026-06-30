@@ -11,6 +11,7 @@
 #include <csignal>
 #include <cmath>
 #include <cstddef>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -216,6 +217,147 @@ std::string format_ctp_timestamp(std::string_view action_day, std::string_view u
     return output.str();
 }
 
+std::string local_date_label() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t raw_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time {};
+    localtime_s(&local_time, &raw_time);
+
+    std::ostringstream output;
+    output << std::put_time(&local_time, "%Y%m%d");
+    return output.str();
+}
+
+std::optional<std::tm> parse_date_label(std::string_view raw_day) {
+    const auto day = canonical_trading_day(raw_day);
+    if (day.size() != 8) {
+        return std::nullopt;
+    }
+
+    std::tm parsed {};
+    std::istringstream input {day};
+    input >> std::get_time(&parsed, "%Y%m%d");
+    if (input.fail()) {
+        return std::nullopt;
+    }
+    parsed.tm_hour = 0;
+    parsed.tm_min = 0;
+    parsed.tm_sec = 0;
+    parsed.tm_isdst = -1;
+    if (std::mktime(&parsed) == static_cast<std::time_t>(-1)) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+std::string format_date_label(const std::tm& parsed) {
+    std::ostringstream output;
+    output << std::put_time(&parsed, "%Y%m%d");
+    return output.str();
+}
+
+std::string shift_date_label(std::string_view raw_day, int days) {
+    auto parsed = parse_date_label(raw_day);
+    if (!parsed.has_value()) {
+        return canonical_trading_day(raw_day);
+    }
+
+    parsed->tm_mday += days;
+    parsed->tm_isdst = -1;
+    if (std::mktime(&*parsed) == static_cast<std::time_t>(-1)) {
+        return canonical_trading_day(raw_day);
+    }
+    return format_date_label(*parsed);
+}
+
+std::string next_weekday_label(std::string_view raw_day) {
+    auto day = shift_date_label(raw_day, 1);
+    for (int guard = 0; guard < 7; ++guard) {
+        auto parsed = parse_date_label(day);
+        if (!parsed.has_value()) {
+            return day;
+        }
+        if (parsed->tm_wday >= 1 && parsed->tm_wday <= 5) {
+            return day;
+        }
+        day = shift_date_label(day, 1);
+    }
+    return day;
+}
+
+std::string current_or_next_weekday_label(std::string_view raw_day) {
+    auto day = canonical_trading_day(raw_day);
+    for (int guard = 0; guard < 7; ++guard) {
+        auto parsed = parse_date_label(day);
+        if (!parsed.has_value()) {
+            return day;
+        }
+        if (parsed->tm_wday >= 1 && parsed->tm_wday <= 5) {
+            return day;
+        }
+        day = shift_date_label(day, 1);
+    }
+    return day;
+}
+
+std::string timestamp_date_label(std::string_view timestamp) {
+    const auto trimmed = itrader::trim_copy(timestamp);
+    if (trimmed.size() >= 8
+        && std::all_of(trimmed.begin(), trimmed.begin() + 8, [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+        return std::string(trimmed.substr(0, 8));
+    }
+    if (trimmed.size() >= 10
+        && std::isdigit(static_cast<unsigned char>(trimmed[0])) != 0
+        && std::isdigit(static_cast<unsigned char>(trimmed[1])) != 0
+        && std::isdigit(static_cast<unsigned char>(trimmed[2])) != 0
+        && std::isdigit(static_cast<unsigned char>(trimmed[3])) != 0
+        && trimmed[4] == '-'
+        && std::isdigit(static_cast<unsigned char>(trimmed[5])) != 0
+        && std::isdigit(static_cast<unsigned char>(trimmed[6])) != 0
+        && trimmed[7] == '-'
+        && std::isdigit(static_cast<unsigned char>(trimmed[8])) != 0
+        && std::isdigit(static_cast<unsigned char>(trimmed[9])) != 0) {
+        std::string day;
+        day.reserve(8);
+        day.append(trimmed.substr(0, 4));
+        day.append(trimmed.substr(5, 2));
+        day.append(trimmed.substr(8, 2));
+        return day;
+    }
+    return {};
+}
+
+std::optional<std::time_t> parse_recorder_timestamp_to_local_time(std::string_view timestamp) {
+    const auto trimmed = itrader::trim_copy(timestamp);
+    if (trimmed.size() < 17) {
+        return std::nullopt;
+    }
+
+    std::tm parsed {};
+    parsed.tm_isdst = -1;
+    std::istringstream input {std::string(trimmed.substr(0, 17))};
+    input >> std::get_time(&parsed, "%Y%m%d %H:%M:%S");
+    if (input.fail()) {
+        return std::nullopt;
+    }
+
+    const auto value = std::mktime(&parsed);
+    if (value == static_cast<std::time_t>(-1)) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+bool timestamp_is_future(std::string_view timestamp, int tolerance_seconds = 120) {
+    const auto parsed = parse_recorder_timestamp_to_local_time(timestamp);
+    if (!parsed.has_value()) {
+        return false;
+    }
+
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    return *parsed > now + tolerance_seconds;
+}
+
 std::string instrument_alpha_prefix(std::string_view instrument) {
     std::string prefix;
     for (const unsigned char ch : instrument) {
@@ -405,6 +547,53 @@ bool should_record_tick_in_trading_session(const RecordedTick& tick) {
     }
 
     return true;
+}
+
+bool is_midnight_night_session_time(int hhmmss, CommodityNightSession session) {
+    switch (session) {
+    case CommodityNightSession::EndsAt0100:
+        return hhmmss >= 0 && hhmmss <= 10000;
+    case CommodityNightSession::EndsAt0230:
+        return hhmmss >= 0 && hhmmss <= 23000;
+    case CommodityNightSession::EndsAt2300:
+    case CommodityNightSession::None:
+    default:
+        return false;
+    }
+}
+
+std::string infer_recording_trading_day(
+    std::string_view raw_trading_day,
+    std::string_view instrument,
+    std::string_view exchange,
+    std::string_view timestamp) {
+
+    const auto fallback_trading_day = canonical_trading_day(raw_trading_day);
+    const auto prefer_later_trading_day = [&fallback_trading_day](const std::string& inferred) {
+        if (fallback_trading_day.size() == 8 && (inferred.empty() || fallback_trading_day > inferred)) {
+            return fallback_trading_day;
+        }
+        return inferred;
+    };
+    const auto action_day = timestamp_date_label(timestamp);
+    const int hhmmss = hhmmss_from_timestamp_label(timestamp);
+    if (action_day.empty() || hhmmss < 0) {
+        return fallback_trading_day;
+    }
+
+    if (is_commodity_futures_exchange(exchange)) {
+        const auto session = commodity_night_session(instrument, exchange);
+        if (session != CommodityNightSession::None) {
+            if (hhmmss >= 205500) {
+                return prefer_later_trading_day(next_weekday_label(action_day));
+            }
+            if (is_midnight_night_session_time(hhmmss, session)) {
+                return prefer_later_trading_day(current_or_next_weekday_label(action_day));
+            }
+        }
+    }
+
+    return fallback_trading_day.empty() ? action_day : fallback_trading_day;
 }
 
 bool looks_like_retryable_recorder_connect_error(std::string_view error_message) {
@@ -809,16 +998,20 @@ private:
         RecordedTick tick;
         tick.instrument = itrader::trim_copy(depth_market_data.InstrumentID);
         tick.exchange = normalize_exchange_code(depth_market_data.ExchangeID);
-        tick.trading_day = canonical_trading_day(depth_market_data.TradingDay);
-        if (tick.trading_day.empty()) {
-            tick.trading_day = session_trading_day();
+        auto ctp_trading_day = canonical_trading_day(depth_market_data.TradingDay);
+        if (ctp_trading_day.empty()) {
+            ctp_trading_day = session_trading_day();
         }
 
         auto action_day = canonical_trading_day(depth_market_data.ActionDay);
         if (action_day.empty()) {
-            action_day = tick.trading_day;
+            action_day = local_date_label();
         }
         tick.timestamp = format_ctp_timestamp(action_day, depth_market_data.UpdateTime, depth_market_data.UpdateMillisec);
+        if (timestamp_is_future(tick.timestamp)) {
+            return std::nullopt;
+        }
+        tick.trading_day = infer_recording_trading_day(ctp_trading_day, tick.instrument, tick.exchange, tick.timestamp);
         tick.last = sanitize_market_value(depth_market_data.LastPrice);
         tick.high = sanitize_market_value(depth_market_data.HighestPrice);
         tick.low = sanitize_market_value(depth_market_data.LowestPrice);

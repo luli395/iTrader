@@ -681,7 +681,7 @@ python scripts/generate_strategy_template.py --name my_strategy --force
 ```powershell
 python scripts/generate_strategy_template.py `
   --name demo_strategy `
-  --output ./temp/demo_strategy.cpp
+  --output E:/iTrader/temp/demo_strategy.cpp
 ```
 
 ### 生成出来的模板长什么样
@@ -705,7 +705,7 @@ python scripts/generate_strategy_template.py `
 - `include/itrader/runtime_snapshot.hpp`
 - `include/itrader/order_slot_state.hpp`
 - `strategies/sample_strategy.cpp`
-- `strategies/sample_strategy.cpp`
+- `strategies/ag_breakout_strict_strategy.cpp`
 
 ## 15. 一句话总结
 

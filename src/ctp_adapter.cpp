@@ -89,6 +89,53 @@ double sanitize_market_price(double value) {
     return is_valid_market_price(value) ? value : 0.0;
 }
 
+std::string current_local_date_compact() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t raw_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time {};
+    localtime_s(&local_time, &raw_time);
+
+    std::ostringstream output;
+    output << std::put_time(&local_time, "%Y%m%d");
+    return output.str();
+}
+
+int parse_update_time_hour(std::string_view update_time) {
+    if (update_time.size() < 2
+        || std::isdigit(static_cast<unsigned char>(update_time[0])) == 0
+        || std::isdigit(static_cast<unsigned char>(update_time[1])) == 0) {
+        return -1;
+    }
+    return static_cast<int>((update_time[0] - '0') * 10 + (update_time[1] - '0'));
+}
+
+std::string depth_market_timestamp(const CThostFtdcDepthMarketDataField* depth_market_data) {
+    if (depth_market_data == nullptr) {
+        return {};
+    }
+
+    auto action_day = trim_copy(depth_market_data->ActionDay);
+    const auto update_time = trim_copy(depth_market_data->UpdateTime);
+    if (update_time.empty()) {
+        return {};
+    }
+
+    const auto local_date = current_local_date_compact();
+    if (action_day.size() < 8 || !std::all_of(action_day.begin(), action_day.begin() + 8, [](unsigned char ch) {
+            return std::isdigit(ch) != 0;
+        })) {
+        action_day = local_date;
+    } else if (action_day.size() > 8) {
+        action_day = action_day.substr(0, 8);
+    }
+
+    if (action_day > local_date && parse_update_time_hour(update_time) >= 20) {
+        action_day = local_date;
+    }
+
+    return action_day + ' ' + update_time;
+}
+
 bool should_defer_fill_determination_to_trade_report(OrderStatus status, int filled_volume) {
     return filled_volume > 0
         && (status == OrderStatus::Filled || status == OrderStatus::PartiallyFilled);
@@ -1043,7 +1090,7 @@ void CtpTraderGateway::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField* d
     }
     if (depth_market_data != nullptr) {
         MarketTick tick;
-        tick.timestamp = std::string(depth_market_data->ActionDay) + ' ' + depth_market_data->UpdateTime;
+        tick.timestamp = depth_market_timestamp(depth_market_data);
         tick.trading_day = trim_copy(depth_market_data->TradingDay);
         tick.instrument = depth_market_data->InstrumentID;
         tick.exchange = depth_market_data->ExchangeID;
@@ -1915,7 +1962,7 @@ void CtpMarketDataGateway::OnRtnDepthMarketData(CThostFtdcDepthMarketDataField* 
     }
 
     MarketTick tick;
-    tick.timestamp = std::string(depth_market_data->ActionDay) + ' ' + depth_market_data->UpdateTime;
+    tick.timestamp = depth_market_timestamp(depth_market_data);
     tick.trading_day = trim_copy(depth_market_data->TradingDay);
     tick.instrument = depth_market_data->InstrumentID;
     tick.exchange = depth_market_data->ExchangeID;

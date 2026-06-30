@@ -125,6 +125,9 @@ void refresh_live_runtime_processes_locked(const std::filesystem::path* workspac
 std::filesystem::path live_runtime_snapshot_config_path_for_request_locked(
     const std::filesystem::path& requested_config_path);
 
+std::vector<std::filesystem::path> live_runtime_config_paths_for_request(
+    const std::filesystem::path& requested_config_path);
+
 std::string make_recorder_runtime_json(
     const std::filesystem::path& workspace_root,
     const std::optional<bool>& ok = std::nullopt,
@@ -935,7 +938,7 @@ std::filesystem::path resolve_path(const std::filesystem::path& base_dir, const 
 }
 
 std::string default_config_filename(std::string_view mode) {
-    return mode == "live" ? "live.example.ini" : "backtest.ini";
+    return mode == "live" ? "live_ag_breakout_strict_safe.ini" : "backtest.ini";
 }
 
 std::filesystem::path default_config_path_for_read(const std::filesystem::path& workspace_root, std::string_view mode) {
@@ -945,13 +948,110 @@ std::filesystem::path default_config_path_for_read(const std::filesystem::path& 
     }
 
     if (mode == "live") {
-        return workspace_root / "configs" / "live.example.ini";
+        return workspace_root / "configs" / "live.ini";
     }
     return workspace_root / "configs" / "backtest.ini";
 }
 
 std::filesystem::path default_config_path_for_write(const std::filesystem::path& workspace_root, std::string_view mode) {
     return workspace_root / "configs" / default_config_filename(mode);
+}
+
+std::string make_config_catalog_json(const std::filesystem::path& workspace_root, std::string_view mode) {
+    const std::string normalized_mode = mode == "live" ? "live" : "backtest";
+    const auto configs_root = (workspace_root / "configs").lexically_normal();
+    const std::string default_name = default_config_filename(normalized_mode);
+    const std::string required_prefix = normalized_mode == "live" ? "live" : "backtest";
+    std::vector<std::filesystem::path> config_paths;
+
+    std::error_code error_code;
+    if (std::filesystem::exists(configs_root, error_code) && std::filesystem::is_directory(configs_root, error_code)) {
+        for (const auto& entry : std::filesystem::directory_iterator(configs_root, std::filesystem::directory_options::skip_permission_denied, error_code)) {
+            if (error_code) {
+                break;
+            }
+            if (!entry.is_regular_file(error_code)) {
+                continue;
+            }
+            const auto path = entry.path();
+            const auto filename = path.filename().generic_string();
+            const auto lowered = lower_copy(filename);
+            if (lower_copy(path.extension().generic_string()) != ".ini") {
+                continue;
+            }
+            if (lowered.rfind(required_prefix, 0) != 0) {
+                continue;
+            }
+            config_paths.push_back(path.lexically_normal());
+        }
+    }
+
+    const auto default_path = (configs_root / default_name).lexically_normal();
+    if (std::find_if(config_paths.begin(), config_paths.end(), [&](const auto& path) {
+            return lower_copy(path.filename().generic_string()) == lower_copy(default_name);
+        }) == config_paths.end()) {
+        config_paths.push_back(default_path);
+    }
+
+    std::sort(config_paths.begin(), config_paths.end(), [&](const auto& left, const auto& right) {
+        const auto left_name = lower_copy(left.filename().generic_string());
+        const auto right_name = lower_copy(right.filename().generic_string());
+        if (left_name == lower_copy(default_name)) {
+            return right_name != lower_copy(default_name);
+        }
+        if (right_name == lower_copy(default_name)) {
+            return false;
+        }
+        return left_name < right_name;
+    });
+
+    std::ostringstream json;
+    json << '{'
+         << "\"ok\":true,"
+         << "\"mode\":" << quoted(normalized_mode) << ','
+         << "\"default_config\":" << quoted(default_name) << ','
+         << "\"configs\":[";
+
+    bool first = true;
+    for (const auto& config_path : config_paths) {
+        const auto filename = config_path.filename().generic_string();
+        const bool exists = std::filesystem::exists(config_path, error_code) && std::filesystem::is_regular_file(config_path, error_code);
+        std::vector<std::string> strategy_ids;
+        if (exists) {
+            try {
+                const auto ini = itrader::IniFile::parse(config_path);
+                for (const auto& section_name : ini.sections_with_prefix("strategy.")) {
+                    const auto separator = section_name.find('.');
+                    strategy_ids.push_back(separator == std::string::npos ? section_name : section_name.substr(separator + 1));
+                }
+            } catch (const std::exception&) {
+                strategy_ids.clear();
+            }
+        }
+
+        if (!first) {
+            json << ',';
+        }
+        first = false;
+
+        json << '{'
+             << "\"name\":" << quoted(filename) << ','
+             << "\"path\":" << quoted((std::filesystem::path("configs") / filename).generic_string()) << ','
+             << "\"default\":" << (lower_copy(filename) == lower_copy(default_name) ? "true" : "false") << ','
+             << "\"exists\":" << (exists ? "true" : "false") << ','
+             << "\"strategy_count\":" << strategy_ids.size() << ','
+             << "\"strategy_ids\":[";
+        for (std::size_t index = 0; index < strategy_ids.size(); ++index) {
+            if (index > 0) {
+                json << ',';
+            }
+            json << quoted(strategy_ids[index]);
+        }
+        json << "]}";
+    }
+
+    json << "]}";
+    return json.str();
 }
 
 std::filesystem::path resolve_config_path(const std::filesystem::path& workspace_root, std::string_view mode, std::string_view requested_config) {
@@ -2606,6 +2706,91 @@ std::vector<std::string> collect_chart_account_ids(const std::vector<std::string
     return account_ids;
 }
 
+void append_unique_text(std::vector<std::string>& values, const std::string& value) {
+    if (!value.empty() && std::find(values.begin(), values.end(), value) == values.end()) {
+        values.push_back(value);
+    }
+}
+
+void append_unique_path(std::vector<std::filesystem::path>& values, const std::filesystem::path& value) {
+    if (value.empty()) {
+        return;
+    }
+
+    const auto normalized_value = normalize_path_for_compare(value);
+    const auto duplicate_it = std::find_if(values.begin(), values.end(), [&normalized_value](const std::filesystem::path& existing) {
+        return normalize_path_for_compare(existing) == normalized_value;
+    });
+    if (duplicate_it == values.end()) {
+        values.push_back(value);
+    }
+}
+
+void merge_runtime_snapshot_for_dashboard(itrader::RuntimeSnapshot& target, const itrader::RuntimeSnapshot& source) {
+    target.mode = source.mode;
+    if (target.chart_bar_seconds <= 1) {
+        target.chart_bar_seconds = source.chart_bar_seconds;
+    }
+
+    for (const auto& warning : source.warnings) {
+        append_unique_text(target.warnings, warning);
+    }
+
+    for (const auto& source_account : source.accounts) {
+        auto target_it = std::find_if(target.accounts.begin(), target.accounts.end(), [&source_account](const itrader::AccountSnapshot& account) {
+            return account.account_id == source_account.account_id;
+        });
+        if (target_it == target.accounts.end()) {
+            target.accounts.push_back(source_account);
+            continue;
+        }
+
+        if (target_it->initial_cash == 0.0) {
+            target_it->initial_cash = source_account.initial_cash;
+        }
+        target_it->cash = source_account.cash;
+        target_it->realized_pnl = source_account.realized_pnl;
+        for (const auto& [instrument, net] : source_account.net_positions) {
+            target_it->net_positions[instrument] = net;
+        }
+    }
+
+    for (const auto& source_attachment : source.strategy_attachments) {
+        const auto key_matches = [&source_attachment](const itrader::StrategyAttachmentSnapshot& attachment) {
+            return attachment.strategy_id == source_attachment.strategy_id
+                && attachment.account_id == source_attachment.account_id;
+        };
+        auto target_it = std::find_if(target.strategy_attachments.begin(), target.strategy_attachments.end(), key_matches);
+        if (target_it == target.strategy_attachments.end()) {
+            target.strategy_attachments.push_back(source_attachment);
+            continue;
+        }
+
+        target_it->positions = source_attachment.positions;
+        target_it->opened_orders = source_attachment.opened_orders;
+        target_it->closed_orders = source_attachment.closed_orders;
+        target_it->opened_order_count = source_attachment.opened_order_count;
+        target_it->closed_order_count = source_attachment.closed_order_count;
+        target_it->filled_trade_count = source_attachment.filled_trade_count;
+        for (const auto& warning : source_attachment.warnings) {
+            append_unique_text(target_it->warnings, warning);
+        }
+    }
+
+    for (const auto& source_instrument : source.chart_instruments) {
+        auto target_it = std::find_if(target.chart_instruments.begin(), target.chart_instruments.end(), [&source_instrument](const itrader::RuntimeChartInstrumentSnapshot& instrument) {
+            return instrument.instrument == source_instrument.instrument;
+        });
+        if (target_it == target.chart_instruments.end()) {
+            target.chart_instruments.push_back(source_instrument);
+            continue;
+        }
+
+        target_it->bars = source_instrument.bars;
+        target_it->indicator_series = source_instrument.indicator_series;
+    }
+}
+
 void populate_backtest_chart_bars(ChartInstrumentPayload& chart_instrument, const std::vector<itrader::MarketTick>& ticks) {
     double previous_close = 0.0;
     bool has_previous_close = false;
@@ -2785,7 +2970,7 @@ std::map<std::string, std::vector<ChartBarPoint>> load_live_chart_bars(const std
             continue;
         }
 
-        const auto epoch = parse_timestamp_to_epoch(telemetry.get(section, "timestamp"));
+        const auto epoch = parse_wall_clock_as_chart_epoch(telemetry.get(section, "timestamp"));
         if (!epoch.has_value()) {
             continue;
         }
@@ -2862,7 +3047,7 @@ std::map<std::string, std::vector<ChartIndicatorSeriesPayload>> load_live_chart_
             continue;
         }
 
-        const auto epoch = parse_timestamp_to_epoch(telemetry.get(section, "timestamp"));
+        const auto epoch = parse_wall_clock_as_chart_epoch(telemetry.get(section, "timestamp"));
         if (!epoch.has_value()) {
             continue;
         }
@@ -2927,6 +3112,7 @@ ChartPayload build_chart_payload(
     bool enable_backtest_replay,
     bool include_backtest_chart,
     bool allow_live_telemetry,
+    const std::vector<std::filesystem::path>& live_chart_config_paths,
     const std::optional<itrader::RuntimeSnapshot>& runtime_snapshot,
     const std::vector<std::string>& runtime_warnings,
     const std::vector<std::string>& strategy_sections,
@@ -2941,11 +3127,7 @@ ChartPayload build_chart_payload(
     chart.warnings = runtime_warnings;
     chart.account_ids = collect_chart_account_ids(account_sections);
 
-    const auto instruments = collect_chart_instruments(ini, strategy_sections);
-    if (instruments.empty()) {
-        append_chart_warning(chart.warnings, "No instrument list is configured yet, so the chart has no market series to display.");
-        return chart;
-    }
+    auto instruments = collect_chart_instruments(ini, strategy_sections);
 
     std::vector<itrader::MarketTick> ticks;
     std::map<std::string, std::vector<ChartBarPoint>> live_bars_by_instrument;
@@ -2969,13 +3151,61 @@ ChartPayload build_chart_payload(
         if (!allow_live_telemetry) {
             append_chart_warning(chart.warnings, "Live chart telemetry was ignored because the shared telemetry file does not match the requested config.");
         } else {
-            try {
-                live_bars_by_instrument = load_live_chart_bars(config_path);
-                live_indicator_series_by_instrument = load_live_chart_indicator_series(config_path);
-            } catch (const std::exception& ex) {
-                append_chart_warning(chart.warnings, std::string("Live chart telemetry is unavailable: ") + ex.what());
+            std::vector<std::filesystem::path> chart_config_paths = live_chart_config_paths;
+            if (chart_config_paths.empty()) {
+                chart_config_paths.push_back(config_path);
+            }
+
+            std::vector<std::string> live_load_errors;
+            for (const auto& chart_config_path : chart_config_paths) {
+                try {
+                    auto bars_by_instrument = load_live_chart_bars(chart_config_path);
+                    for (auto& [instrument, bars] : bars_by_instrument) {
+                        auto& merged_bars = live_bars_by_instrument[instrument];
+                        merged_bars = merge_chart_bar_points(merged_bars, bars, 0);
+                    }
+                } catch (const std::exception& ex) {
+                    live_load_errors.push_back(chart_config_path.filename().generic_string() + ": " + ex.what());
+                }
+
+                try {
+                    auto indicator_series_by_instrument = load_live_chart_indicator_series(chart_config_path);
+                    for (auto& [instrument, series] : indicator_series_by_instrument) {
+                        auto& merged_series = live_indicator_series_by_instrument[instrument];
+                        for (auto& entry : series) {
+                            merged_series.push_back(std::move(entry));
+                        }
+                        std::sort(merged_series.begin(), merged_series.end(), [](const ChartIndicatorSeriesPayload& left, const ChartIndicatorSeriesPayload& right) {
+                            if (left.strategy_id != right.strategy_id) {
+                                return left.strategy_id < right.strategy_id;
+                            }
+                            if (left.account_id != right.account_id) {
+                                return left.account_id < right.account_id;
+                            }
+                            return left.indicator_id < right.indicator_id;
+                        });
+                    }
+                } catch (const std::exception& ex) {
+                    live_load_errors.push_back(chart_config_path.filename().generic_string() + ": " + ex.what());
+                }
+            }
+
+            for (const auto& [instrument, _] : live_bars_by_instrument) {
+                append_unique_text(instruments, instrument);
+            }
+            for (const auto& [instrument, _] : live_indicator_series_by_instrument) {
+                append_unique_text(instruments, instrument);
+            }
+
+            if (live_bars_by_instrument.empty() && live_indicator_series_by_instrument.empty() && !live_load_errors.empty()) {
+                append_chart_warning(chart.warnings, "Live chart telemetry is unavailable: " + join_strings(live_load_errors, "; "));
             }
         }
+    }
+
+    if (instruments.empty()) {
+        append_chart_warning(chart.warnings, "No instrument list is configured yet, so the chart has no market series to display.");
+        return chart;
     }
 
     for (const auto& instrument : instruments) {
@@ -3733,6 +3963,7 @@ std::string make_ui_state_json(
     auto runtime_state_config_path = config_path;
     std::optional<itrader::IniFile> runtime_state_ini_storage;
     std::vector<std::string> runtime_state_strategy_sections = strategy_sections;
+    std::vector<std::filesystem::path> live_chart_config_paths;
     if (runtime_mode == itrader::Mode::Live) {
         {
             std::scoped_lock guard(g_live_runtime_mutex);
@@ -3746,6 +3977,12 @@ std::string make_ui_state_json(
             runtime_state_strategy_sections = runtime_state_ini_storage->sections_with_prefix("strategy.");
         } else {
             runtime_state_config_path = config_path;
+        }
+
+        live_chart_config_paths = live_runtime_config_paths_for_request(config_path);
+        append_unique_path(live_chart_config_paths, runtime_state_config_path);
+        if (live_chart_config_paths.empty()) {
+            live_chart_config_paths.push_back(config_path);
         }
     }
     const auto& runtime_state_ini = runtime_state_ini_storage.has_value() ? *runtime_state_ini_storage : ini;
@@ -3800,6 +4037,38 @@ std::string make_ui_state_json(
         }
     } else if (runtime_mode == itrader::Mode::Backtest) {
         runtime_warnings.push_back("Backtest runtime replay is skipped during dashboard hydration to keep the UI responsive. Click Run on an attached strategy to compute positions, trades, and chart markers for the current config.");
+    }
+
+    if (runtime_mode == itrader::Mode::Live && allow_live_telemetry && live_chart_config_paths.size() > 1) {
+        std::optional<itrader::RuntimeSnapshot> merged_live_snapshot;
+        for (const auto& live_config_path : live_chart_config_paths) {
+            try {
+                const auto live_ini = std::filesystem::exists(live_config_path)
+                    ? itrader::IniFile::parse(live_config_path)
+                    : runtime_state_ini;
+                auto live_snapshot = itrader::build_runtime_snapshot(
+                    live_config_path,
+                    live_ini,
+                    itrader::Mode::Live,
+                    effective_snapshot_build_options == nullptr ? itrader::RuntimeSnapshotBuildOptions {} : *effective_snapshot_build_options);
+                if (!merged_live_snapshot.has_value()) {
+                    merged_live_snapshot = std::move(live_snapshot);
+                } else {
+                    merge_runtime_snapshot_for_dashboard(*merged_live_snapshot, live_snapshot);
+                }
+            } catch (const std::exception& ex) {
+                append_unique_text(runtime_warnings, "Runtime detail snapshot unavailable for "
+                    + live_config_path.filename().generic_string() + ": " + ex.what());
+            }
+        }
+
+        if (merged_live_snapshot.has_value()) {
+            runtime_snapshot = std::move(merged_live_snapshot);
+            for (const auto& warning : runtime_warnings) {
+                append_unique_text(runtime_snapshot->warnings, warning);
+            }
+            runtime_warnings = runtime_snapshot->warnings;
+        }
     }
 
     std::map<std::string, itrader::AccountSnapshot> runtime_accounts_by_id;
@@ -3895,15 +4164,16 @@ std::string make_ui_state_json(
     json << "],";
 
     const auto chart = build_chart_payload(
-        runtime_mode == itrader::Mode::Live ? runtime_state_config_path : config_path,
-        runtime_mode == itrader::Mode::Live ? runtime_state_ini : ini,
+        config_path,
+        ini,
         normalized_mode,
         enable_backtest_replay,
         include_backtest_chart,
         allow_live_telemetry,
+        live_chart_config_paths,
         runtime_snapshot,
         runtime_warnings,
-        runtime_mode == itrader::Mode::Live ? runtime_state_strategy_sections : strategy_sections,
+        strategy_sections,
         account_sections);
     json << "\"chart\":";
     append_chart_payload(json, chart);
@@ -4621,11 +4891,17 @@ void refresh_live_runtime_processes_locked(const std::filesystem::path* workspac
 
 std::filesystem::path live_runtime_snapshot_config_path_for_request_locked(const std::filesystem::path& requested_config_path) {
     refresh_live_runtime_processes_locked();
+    const LiveRuntimeProcess* newest_matching_runtime = nullptr;
     for (const auto& [runtime_key, runtime] : g_live_runtime_processes) {
         (void)runtime_key;
         if (runtime.status == "running" && live_runtime_config_matches_requested(runtime, requested_config_path)) {
-            return runtime.config_path.empty() ? requested_config_path : runtime.config_path;
+            if (newest_matching_runtime == nullptr || runtime.started_at_ms >= newest_matching_runtime->started_at_ms) {
+                newest_matching_runtime = &runtime;
+            }
         }
+    }
+    if (newest_matching_runtime != nullptr) {
+        return newest_matching_runtime->config_path.empty() ? requested_config_path : newest_matching_runtime->config_path;
     }
     return requested_config_path;
 }
@@ -6153,6 +6429,11 @@ HttpResponse route_request(const std::filesystem::path& workspace_root, const Ht
 
     if (path == "/api/health") {
         return HttpResponse {"200 OK", "application/json; charset=utf-8", "{\"ok\":true,\"service\":\"itrader_ui_api\"}"};
+    }
+
+    if (path == "/api/configs") {
+        const auto mode = get_query_value(query, "mode");
+        return HttpResponse {"200 OK", "application/json; charset=utf-8", make_config_catalog_json(workspace_root, mode)};
     }
 
     if (path == "/api/strategy-files") {

@@ -270,7 +270,7 @@ Move these concerns from strategy into runtime:
 - session open/close detection
 - trading-day boundaries
 
-### Phase 4. Refactor production strategies
+### Phase 4. Refactor current `ag_breakout_strict_strategy`
 
 Current strategy should be split into:
 
@@ -297,7 +297,7 @@ After the above:
 To fully reach the goal, these current project mechanisms should be retired or isolated:
 
 - `OrderRequest.backtest_force_fill`
-- strategy-local fill simulation in strategy DLLs
+- strategy-local fill simulation in `ag_breakout_strict_strategy`
 - strategy-local bar engine for mode16
 - direct dependence on file boundaries inside strategy code
 
@@ -313,3 +313,4 @@ The architecture is complete when:
 - backtest and live differ only in adapter implementation
 - order lifecycle is runtime-owned, not strategy-owned
 - switching between backtest and live is done by config only
+

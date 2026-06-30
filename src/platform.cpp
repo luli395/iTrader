@@ -81,7 +81,7 @@ std::string normalize_exchange_code(std::string_view raw) {
     if (value == "XZCE") {
         return "CZCE";
     }
-    if (value == "XCFFEX") {
+    if (value == "XCFFEX" || value == "CCFX") {
         return "CFFEX";
     }
     if (value == "XINE") {
@@ -93,11 +93,53 @@ std::string normalize_exchange_code(std::string_view raw) {
     return value;
 }
 
+std::string infer_exchange_from_instrument(std::string_view raw_instrument) {
+    const auto instrument = upper_copy(trim_copy(raw_instrument));
+    std::string prefix;
+    for (const char ch : instrument) {
+        if (std::isalpha(static_cast<unsigned char>(ch)) == 0) {
+            break;
+        }
+        prefix.push_back(ch);
+    }
+    if (prefix == "IF" || prefix == "IH" || prefix == "IC" || prefix == "IM") {
+        return "CFFEX";
+    }
+    return {};
+}
+
+bool looks_like_decimal_number(std::string_view raw) {
+    const auto value = trim_copy(raw);
+    if (value.empty()) {
+        return false;
+    }
+
+    bool saw_digit = false;
+    bool saw_dot = false;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const char ch = value[index];
+        if ((ch == '+' || ch == '-') && index == 0) {
+            continue;
+        }
+        if (ch == '.' && !saw_dot) {
+            saw_dot = true;
+            continue;
+        }
+        if (std::isdigit(static_cast<unsigned char>(ch)) != 0) {
+            saw_digit = true;
+            continue;
+        }
+        return false;
+    }
+    return saw_digit;
+}
+
 std::pair<std::string, std::string> split_symbol_and_exchange(std::string_view raw_symbol) {
     const auto trimmed = trim_copy(raw_symbol);
     const auto delimiter = trimmed.find('.');
     if (delimiter == std::string::npos) {
-        return {upper_copy(trimmed), {}};
+        const auto instrument = upper_copy(trimmed);
+        return {instrument, infer_exchange_from_instrument(instrument)};
     }
     return {
         upper_copy(trimmed.substr(0, delimiter)),
@@ -950,6 +992,15 @@ std::string trading_day_label(std::string_view raw_timestamp) {
         && std::isdigit(static_cast<unsigned char>(trimmed[0])) != 0
         && std::isdigit(static_cast<unsigned char>(trimmed[7])) != 0) {
         const std::string date = trimmed.substr(0, 8);
+        if (trimmed.size() >= 11
+            && std::isspace(static_cast<unsigned char>(trimmed[8])) != 0
+            && std::isdigit(static_cast<unsigned char>(trimmed[9])) != 0
+            && std::isdigit(static_cast<unsigned char>(trimmed[10])) != 0) {
+            const int hour = std::stoi(trimmed.substr(9, 2));
+            if (hour >= 20) {
+                return shift_trading_day_label(date, false);
+            }
+        }
         if (trimmed.size() >= 10
             && std::isdigit(static_cast<unsigned char>(trimmed[8])) != 0
             && std::isdigit(static_cast<unsigned char>(trimmed[9])) != 0) {
@@ -965,6 +1016,23 @@ std::string trading_day_label(std::string_view raw_timestamp) {
 
 std::string trading_day_label_from_tick(const MarketTick& tick) {
     if (!tick.trading_day.empty()) {
+        const auto compact_digits = [](std::string_view raw_label) {
+            std::string digits;
+            digits.reserve(raw_label.size());
+            for (const char ch : raw_label) {
+                if (std::isdigit(static_cast<unsigned char>(ch)) != 0) {
+                    digits.push_back(ch);
+                }
+            }
+            return digits;
+        };
+        const auto inferred = trading_day_label(tick.timestamp);
+        const auto normalized_reported = compact_digits(tick.trading_day);
+        const auto normalized_inferred = compact_digits(inferred);
+        if (normalized_reported.size() == 8 && normalized_inferred.size() == 8
+            && normalized_inferred > normalized_reported) {
+            return normalized_inferred;
+        }
         return tick.trading_day;
     }
     return trading_day_label(tick.timestamp);
@@ -2018,6 +2086,16 @@ std::string format_epoch_timestamp(long long epoch_seconds) {
     return output.str();
 }
 
+std::string format_chart_bucket_timestamp(long long epoch_seconds) {
+    const std::time_t time_value = static_cast<std::time_t>(epoch_seconds);
+    std::tm utc_time {};
+    gmtime_s(&utc_time, &time_value);
+
+    std::ostringstream output;
+    output << std::put_time(&utc_time, "%Y-%m-%d %H:%M:%S");
+    return output.str();
+}
+
 long long chart_bucket_start(long long epoch_seconds, int chart_bar_seconds) {
     const long long bucket_seconds = std::max(1, chart_bar_seconds);
     return epoch_seconds - (epoch_seconds % bucket_seconds);
@@ -2361,7 +2439,7 @@ void update_live_chart_bars(
     LiveChartBar bar;
     bar.instrument = tick.instrument;
     bar.bucket_epoch = bucket_epoch;
-    bar.timestamp = format_epoch_timestamp(bucket_epoch);
+    bar.timestamp = format_chart_bucket_timestamp(bucket_epoch);
     bar.open = tick.last;
     bar.high = tick.last;
     bar.low = tick.last;
@@ -2465,7 +2543,7 @@ void merge_live_chart_bars(
             merged.high = std::max(merged.high, bar.high);
             merged.low = merged.low > 0.0 ? std::min(merged.low, bar.low) : bar.low;
             merged.close = bar.close;
-            merged.timestamp = bar.timestamp.empty() ? format_epoch_timestamp(bar.bucket_epoch) : bar.timestamp;
+            merged.timestamp = bar.timestamp.empty() ? format_chart_bucket_timestamp(bar.bucket_epoch) : bar.timestamp;
         }
 
         target.clear();
@@ -3152,7 +3230,7 @@ std::vector<MarketTick> load_ticks_from_csv_filtered(
 
         MarketTick tick;
         tick.trading_day = trading_day_override;
-        if (fields.size() < 12 || fields[1].find('.') == std::string::npos) {
+        if (fields.size() < 12) {
             throw std::runtime_error(
                 "Backtest CSV must use AGTICK format "
                 "(time,symbol,current,high,low,volume,money,position,a1_v,a1_p,b1_v,b1_p[,upper_limit_price,lower_limit_price]): "
@@ -3616,41 +3694,40 @@ private:
             tick = MarketTick {};
             tick.trading_day = source_.trading_day;
 
-            if (field_count >= 12) {
+            if (field_count >= 12
+                && looks_like_decimal_number(std::string_view(raw + starts[2], static_cast<std::size_t>(lengths[2])))) {
                 const std::string_view symbol_field(raw + starts[1], static_cast<std::size_t>(lengths[1]));
-                if (symbol_field.find('.') != std::string_view::npos) {
-                    const std::string_view timestamp_field(raw + starts[0], static_cast<std::size_t>(lengths[0]));
-                    tick.timestamp.assign(timestamp_field);
-                    tick.timestamp_ms = parse_timestamp_to_millis(timestamp_field).value_or(0);
+                const std::string_view timestamp_field(raw + starts[0], static_cast<std::size_t>(lengths[0]));
+                tick.timestamp.assign(timestamp_field);
+                tick.timestamp_ms = parse_timestamp_to_millis(timestamp_field).value_or(0);
 
-                    const auto* cached_symbol = find_symbol_cache(symbol_field);
-                    if (cached_symbol == nullptr) {
-                        cached_symbol = &cache_symbol(symbol_field);
-                    }
-                    if (!cached_symbol->allowed) {
-                        continue;
-                    }
-
-                    tick.instrument = cached_symbol->instrument;
-                    tick.exchange = cached_symbol->exchange;
-                    tick.last = fast_parse_double(raw + starts[2], lengths[2]);
-                    tick.volume = static_cast<int>(std::llround(fast_parse_double(raw + starts[5], lengths[5])));
-                    tick.turnover = fast_parse_double(raw + starts[6], lengths[6]);
-                    tick.ask_size = static_cast<int>(std::llround(fast_parse_double(raw + starts[8], lengths[8])));
-                    tick.ask = fast_parse_double(raw + starts[9], lengths[9]);
-                    tick.bid_size = static_cast<int>(std::llround(fast_parse_double(raw + starts[10], lengths[10])));
-                    tick.bid = fast_parse_double(raw + starts[11], lengths[11]);
-                    if (field_count > 12 && lengths[12] > 0) {
-                        tick.upper_limit_price = fast_parse_double(raw + starts[12], lengths[12]);
-                    }
-                    if (field_count > 13 && lengths[13] > 0) {
-                        tick.lower_limit_price = fast_parse_double(raw + starts[13], lengths[13]);
-                    }
-                    if (tick.ask <= 0.0 || tick.bid <= 0.0 || tick.ask_size <= 0 || tick.bid_size <= 0) {
-                        continue;
-                    }
-                    return true;
+                const auto* cached_symbol = find_symbol_cache(symbol_field);
+                if (cached_symbol == nullptr) {
+                    cached_symbol = &cache_symbol(symbol_field);
                 }
+                if (!cached_symbol->allowed) {
+                    continue;
+                }
+
+                tick.instrument = cached_symbol->instrument;
+                tick.exchange = cached_symbol->exchange;
+                tick.last = fast_parse_double(raw + starts[2], lengths[2]);
+                tick.volume = static_cast<int>(std::llround(fast_parse_double(raw + starts[5], lengths[5])));
+                tick.turnover = fast_parse_double(raw + starts[6], lengths[6]);
+                tick.ask_size = static_cast<int>(std::llround(fast_parse_double(raw + starts[8], lengths[8])));
+                tick.ask = fast_parse_double(raw + starts[9], lengths[9]);
+                tick.bid_size = static_cast<int>(std::llround(fast_parse_double(raw + starts[10], lengths[10])));
+                tick.bid = fast_parse_double(raw + starts[11], lengths[11]);
+                if (field_count > 12 && lengths[12] > 0) {
+                    tick.upper_limit_price = fast_parse_double(raw + starts[12], lengths[12]);
+                }
+                if (field_count > 13 && lengths[13] > 0) {
+                    tick.lower_limit_price = fast_parse_double(raw + starts[13], lengths[13]);
+                }
+                if (tick.ask <= 0.0 || tick.bid <= 0.0 || tick.ask_size <= 0 || tick.bid_size <= 0) {
+                    continue;
+                }
+                return true;
             }
 
             if (field_count < 7) {

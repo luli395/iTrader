@@ -1,7 +1,7 @@
 const API_BASE = window.location.protocol.startsWith('http')
     ? window.location.origin
     : 'http://127.0.0.1:8080';
-const APP_ASSET_VERSION = '20260602_live_chart_cache_merge';
+const APP_ASSET_VERSION = '20260626_config_selector';
 
 function createSampleRecorderConfig() {
     return {
@@ -18,8 +18,8 @@ function createSampleRecorderConfig() {
         connect_timeout_ms: '15000',
         deduplicate_exact_ticks: 'true',
         auto_restart_enabled: 'true',
-        front: 'tcp://127.0.0.1:17002',
-        broker_id: '',
+        front: 'tcp://182.254.243.31:30013',
+        broker_id: '9999',
         user_id: '',
         password: '',
         product_info: 'iTrader',
@@ -91,7 +91,7 @@ const sampleStates = {
             }
         ],
         backtest: {
-            data_dir: './data/ticks',
+            data_dir: 'E:/trade/data/tick/AGTICK',
             csv: ''
         },
         live: {
@@ -151,10 +151,10 @@ const sampleStates = {
                 id: 'ctp_demo',
                 front: 'tcp://127.0.0.1:17001',
                 md_front: 'tcp://127.0.0.1:17002',
-                broker_id: '',
-                user_id: '',
-                investor_id: '',
-                password: '',
+                broker_id: '9999',
+                user_id: '000000',
+                investor_id: '000000',
+                password: 'replace-me',
                 app_id: '',
                 auth_code: '',
                 product_info: 'iTrader',
@@ -282,10 +282,19 @@ const runtime = {
     strategyFileCatalogKey: '',
     strategyFileCatalogStatus: 'idle',
     strategyFileCatalogError: '',
-    pendingStrategyUpload: false
+    pendingStrategyUpload: false,
+    configCatalog: [],
+    configCatalogMode: '',
+    configCatalogError: '',
+    pendingConfigCatalogLoad: false
 };
 const pageParams = new URLSearchParams(window.location.search);
-const requestedConfig = (pageParams.get('config') || '').trim();
+const initialMode = pageParams.get('mode') === 'live' ? 'live' : 'backtest';
+const initialRequestedConfig = (pageParams.get('config') || '').trim();
+const requestedConfigByMode = {
+    backtest: initialMode === 'backtest' ? initialRequestedConfig : '',
+    live: initialMode === 'live' ? initialRequestedConfig : ''
+};
 const restoredSavedStrategyPresetKey = (() => {
     try {
         const value = window.sessionStorage.getItem('itrader:lastSavedStrategyPresetKey') || '';
@@ -303,8 +312,26 @@ if (pageParams.has('_ui_reload') || pageParams.has('_saved_preset') || pageParam
     window.history.replaceState(null, document.title, cleanedUrl.toString());
 }
 const DEFAULT_CONFIG_BY_MODE = Object.freeze({
-    live: 'live.example.ini',
+    live: 'live_ag_breakout_strict_safe.ini',
     backtest: 'backtest.ini'
+});
+
+const FALLBACK_CONFIG_CATALOG_BY_MODE = Object.freeze({
+    live: [
+        'live_ag_breakout_strict_safe.ini',
+        'live_oi_gapping_strategy.ini',
+        'live_oi_gapping_strategy_probe.ini',
+        'live_breakout_safe.ini',
+        'live_timed_roundtrip_safe.ini',
+        'live_prod.ini',
+        'live_probe.ini',
+        'live.ini'
+    ],
+    backtest: [
+        'backtest.ini',
+        'backtest_breakout.ini',
+        'backtest_timed_roundtrip.ini'
+    ]
 });
 
 function defaultConfigNameForMode(mode) {
@@ -315,8 +342,12 @@ function defaultConfigPathForMode(mode) {
     return `configs/${defaultConfigNameForMode(mode)}`;
 }
 
+function requestedConfigForMode(mode = state.mode) {
+    return requestedConfigByMode[mode] || '';
+}
+
 function effectiveRequestedConfig(mode = state.mode) {
-    return requestedConfig || defaultConfigNameForMode(mode);
+    return requestedConfigForMode(mode) || defaultConfigNameForMode(mode);
 }
 const uiState = {
     collapsedStrategies: new Set(),
@@ -368,6 +399,7 @@ const toggleRecorderPanelButton = document.getElementById('toggle-recorder-panel
 const saveRecorderConfigButton = document.getElementById('save-recorder-config-button');
 const startRecorderButton = document.getElementById('start-recorder-button');
 const stopRecorderButton = document.getElementById('stop-recorder-button');
+const configSelect = document.getElementById('config-select');
 const statusPill = document.getElementById('status-pill');
 const statusCaption = document.getElementById('status-caption');
 const backtestProgress = document.getElementById('backtest-progress');
@@ -445,8 +477,9 @@ const sectionMap = {
 
 function buildModeQuery(mode) {
     const query = new URLSearchParams({ mode });
-    if (requestedConfig) {
-        query.set('config', requestedConfig);
+    const configName = requestedConfigForMode(mode);
+    if (configName) {
+        query.set('config', configName);
     }
     return query;
 }
@@ -1471,6 +1504,137 @@ async function loadStrategyFileCatalog({ force = false, silent = false } = {}) {
         }
         return [];
     }
+}
+
+function normalizeConfigCatalogEntries(payload, mode) {
+    const defaultName = String(payload?.default_config || defaultConfigNameForMode(mode)).trim();
+    const selectedName = effectiveRequestedConfig(mode);
+    const seen = new Set();
+    const entries = [];
+
+    const addEntry = (entry, fallback = {}) => {
+        const name = String(typeof entry === 'string' ? entry : entry?.name || '').trim();
+        if (!name || seen.has(name)) {
+            return;
+        }
+        seen.add(name);
+        entries.push({
+            name,
+            path: typeof entry === 'object' && entry !== null ? String(entry.path || '') : '',
+            strategy_count: typeof entry === 'object' && entry !== null ? Number(entry.strategy_count || 0) : 0,
+            default: name === defaultName || Boolean(fallback.default)
+        });
+    };
+
+    addEntry({ name: defaultName, default: true });
+    if (selectedName && selectedName !== defaultName) {
+        addEntry({ name: selectedName });
+    }
+    const sourceEntries = Array.isArray(payload?.configs)
+        ? payload.configs
+        : (FALLBACK_CONFIG_CATALOG_BY_MODE[mode] || []);
+    sourceEntries.forEach((entry) => addEntry(entry));
+
+    return entries.sort((left, right) => {
+        if (left.default !== right.default) {
+            return left.default ? -1 : 1;
+        }
+        return left.name.localeCompare(right.name);
+    });
+}
+
+async function loadConfigCatalog(mode, { silent = true } = {}) {
+    runtime.pendingConfigCatalogLoad = true;
+    runtime.configCatalogMode = mode;
+    runtime.configCatalogError = '';
+
+    try {
+        const query = new URLSearchParams({ mode });
+        const response = await fetch(`${API_BASE}/api/configs?${query.toString()}`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        runtime.configCatalog = normalizeConfigCatalogEntries(payload, mode);
+        runtime.configCatalogMode = mode;
+        runtime.configCatalogError = '';
+    } catch (error) {
+        runtime.configCatalog = normalizeConfigCatalogEntries(null, mode);
+        runtime.configCatalogMode = mode;
+        runtime.configCatalogError = error instanceof Error ? error.message : String(error);
+        if (!silent) {
+            runtime.lastMessage = `Unable to load ${mode} config list: ${runtime.configCatalogError}.`;
+        }
+    } finally {
+        runtime.pendingConfigCatalogLoad = false;
+    }
+}
+
+function syncUrlModeAndConfig(mode) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('mode', mode);
+    const explicitConfig = requestedConfigForMode(mode);
+    if (explicitConfig) {
+        url.searchParams.set('config', explicitConfig);
+    } else {
+        url.searchParams.delete('config');
+    }
+    window.history.replaceState(null, document.title, url.toString());
+}
+
+async function switchConfig(configName) {
+    const mode = state.mode;
+    const normalized = String(configName || '').trim();
+    if (!normalized || normalized === effectiveRequestedConfig(mode)) {
+        return;
+    }
+
+    requestedConfigByMode[mode] = normalized === defaultConfigNameForMode(mode) ? '' : normalized;
+    syncUrlModeAndConfig(mode);
+    resetStrategyFileCatalog();
+    renderSectionCache.runtimeLogScopeKey = '';
+    renderSectionCache.runtimeLogKey = '';
+    renderSectionCache.runtimeLogEntries = [];
+    runtime.lastMessage = `Loading ${mode} configuration ${effectiveRequestedConfig(mode)}...`;
+    render();
+    await hydrateMode(mode);
+}
+
+function renderConfigSelector() {
+    if (!configSelect) {
+        return;
+    }
+
+    const mode = state.mode;
+    if (runtime.configCatalogMode !== mode || runtime.configCatalog.length === 0) {
+        runtime.configCatalog = normalizeConfigCatalogEntries(null, mode);
+        runtime.configCatalogMode = mode;
+    }
+
+    const selectedName = effectiveRequestedConfig(mode);
+    const optionsKey = JSON.stringify({
+        mode,
+        selectedName,
+        configs: runtime.configCatalog.map((entry) => [entry.name, entry.default, entry.strategy_count])
+    });
+
+    if (configSelect.dataset.renderKey !== optionsKey) {
+        configSelect.replaceChildren();
+        runtime.configCatalog.forEach((entry) => {
+            const option = document.createElement('option');
+            option.value = entry.name;
+            const countSuffix = entry.strategy_count > 0 ? `, ${entry.strategy_count} strategies` : '';
+            option.textContent = `${entry.name}${entry.default ? ' (default)' : ''}${countSuffix}`;
+            configSelect.append(option);
+        });
+        configSelect.dataset.renderKey = optionsKey;
+    }
+
+    configSelect.disabled = runtime.pendingConfigCatalogLoad || runtime.pendingLiveControlAction;
+    configSelect.value = selectedName;
+    configSelect.title = runtime.configCatalogError
+        ? `Config list fallback: ${runtime.configCatalogError}`
+        : `Current config: ${selectedName}`;
 }
 
 function catalogHasStrategyFilename(filename) {
@@ -3347,6 +3511,8 @@ async function hydrateMode(mode, { preferSample = false } = {}) {
         return;
     }
 
+    await loadConfigCatalog(mode, { silent: true });
+
     try {
         const payload = await fetchModeStatePayload(mode);
         applyState(normalizeIncomingState(payload, mode));
@@ -3384,6 +3550,7 @@ function switchMode(mode) {
     if (uiState.pendingBacktestRunKey) {
         cancelBacktestRunWait();
     }
+    syncUrlModeAndConfig(mode);
     if (mode !== 'live') {
         clearLiveRuntimePollTimer();
         clearRecorderRuntimePollTimer();
@@ -8085,7 +8252,7 @@ function defaultAccount(mode) {
             id: `ctp_${state.accounts.length + 1}`,
             front: 'tcp://127.0.0.1:17001',
             md_front: 'tcp://127.0.0.1:17002',
-            broker_id: '',
+            broker_id: '9999',
             user_id: '',
             investor_id: '',
             password: '',
@@ -8171,6 +8338,7 @@ async function saveConfigToWorkspace() {
 
 function performRenderNow() {
     const focusState = captureFocusedFieldState();
+    renderConfigSelector();
     renderMetrics();
     renderBacktestSourceSettings();
     renderLiveExecutionSettings();
@@ -8324,6 +8492,16 @@ document.querySelectorAll('#mode-switch .segmented__item').forEach((button) => {
     button.addEventListener('click', () => switchMode(button.dataset.mode));
 });
 
+if (configSelect) {
+    configSelect.addEventListener('change', () => {
+        switchConfig(configSelect.value).catch((error) => {
+            const detail = error instanceof Error ? error.message : String(error);
+            runtime.lastMessage = `Unable to switch config: ${detail}.`;
+            render();
+        });
+    });
+}
+
 document.querySelectorAll('.nav__item').forEach((button) => {
     button.addEventListener('click', () => setActiveSection(button.dataset.section));
 });
@@ -8447,7 +8625,7 @@ document.addEventListener('change', (event) => {
 
 setActiveSection('overview');
 startUiAssetVersionWatcher();
-hydrateMode(pageParams.get('mode') === 'live' ? 'live' : 'backtest').catch(() => {
+hydrateMode(initialMode).catch(() => {
     applyState(structuredClone(sampleStates.backtest));
     runtime.apiConnected = false;
     runtime.sourceConfig = 'sample-state';

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>iTrader Control Center</title>
-    <link rel="stylesheet" href="./styles.css?v=20260524_account_summary_inventory_draft" />
+    <link rel="stylesheet" href="./styles.css?v=20260626_config_selector" />
     <script>
         window.__itraderChartLibraryLoaded = false;
         window.__itraderChartLibraryFailed = false;
@@ -37,7 +37,7 @@
 
             <section class="sidebar-card">
                 <p class="sidebar-card__label">Workspace</p>
-                <p class="sidebar-card__value">Local workspace</p>
+                <p class="sidebar-card__value">E:\\iTrader</p>
                 <p class="sidebar-card__muted">Browser UI with optional localhost API integration for config-backed data.</p>
             </section>
 
@@ -56,6 +56,10 @@
                 </div>
 
                 <div class="topbar__actions">
+                    <label class="config-switch" for="config-select">
+                        <span>Config</span>
+                        <select id="config-select" aria-label="Config preset"></select>
+                    </label>
                     <div class="segmented" id="mode-switch">
                         <button class="segmented__item segmented__item--active" data-mode="backtest">Backtest</button>
                         <button class="segmented__item" data-mode="live">Live</button>
@@ -342,6 +346,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=20260602_live_chart_cache_merge"></script>
+    <script src="./app.js?v=20260626_config_selector"></script>
 </body>
 </html>

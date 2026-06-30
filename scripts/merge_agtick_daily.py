@@ -3,7 +3,7 @@
 
 Input layout example:
 
-    TICK_ROOT/
+    OIPYTICK/
       OITICK2526/OI_20250103.csv
       PTICK2526/P_20250103.csv
       YTICK2526/Y_20250103.csv
